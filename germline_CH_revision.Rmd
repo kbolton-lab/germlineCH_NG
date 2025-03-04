@@ -1,0 +1,3434 @@
+---
+title: "Germline_CH"
+author: "Jie Liu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+# Load required package
+```{r Step 1: Load required package, message=FALSE, include=FALSE, paged.print=FALSE}
+rm(list = ls())
+
+options(repos = c(CRAN = "https://cran.rstudio.com/"))
+pkg <-
+  c("tidyverse",
+    "writexl",
+    "xlsx",
+    "readxl",
+    "openxlsx",
+    "data.table",
+    "table1",
+    "stringr",
+    "glue",
+    "patchwork",
+    "cowplot",
+    "ggpubr",
+    "ggsci",
+    "gtools",
+    "systemfonts",
+    "kableExtra",
+    "RColorBrewer",
+    "ComplexHeatmap",
+    "Hmisc",
+    "png",
+    "survival",
+    "survminer",
+    "logistf")
+for (p in pkg) {
+  if (require(p, character.only = T)) {
+    print(paste0(p, " loaded successfully"))
+  } else {
+    install.packages(p)
+    require(p, character.only = T)
+    print(paste0(p, " downloaded and loaded successfully"))
+  }
+}
+
+```
+
+# Env setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	#message = FALSE,
+	#warning = FALSE,
+	include = FALSE
+)
+
+```
+
+# Load R tools
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+source('utils/toolbox.R')
+source('utils/plotSignature.R')
+source("utils/get_protein_info_canonical.R")
+source("utils/lollipop_disease.R")
+
+savePdf = function(p=p,w=w,h=h,dpi=300,o=o) {
+  ggsave(paste0("Figures/",o), plot = p, width = w, height = h, units = c("mm"), dpi = dpi)
+}
+
+format_p_value <- function(p) {
+  if (!is.numeric(p) || any(p < 0 | p > 1, na.rm = TRUE)) {
+    stop("p must be a numeric value between 0 and 1.")
+  }
+  
+  formatted_p <- sapply(p, function(x) {
+    if (is.na(x)) {
+      return(NA)
+    } else if (x < 0.001) {
+      return(sprintf("p<0.001", x))  
+    } else if (x < 0.05) {
+      return(sprintf("p=%.3f", x))  
+    } else {
+      return(sprintf("p=%.2f", x))  
+    }
+  })
+  
+  return(formatted_p)
+}
+
+```
+
+# Plot settings
+```{r include=FALSE}
+
+font_size = 6
+
+th <- theme_classic() + theme(axis.text = element_text(color = "black"))
+theme_set(th)
+
+plot_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    
+    plot.margin = unit(c(0,0,0,0), 'pt'),
+
+    plot.title = element_text(size =font_size, hjust = 0.5, vjust = 0),
+    plot.subtitle = element_text(hjust = 0.5, size = font_size),
+    
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 6),
+    legend.key.size = unit(5, 'mm'),
+    
+    axis.title = element_text(size = font_size),
+    axis.text.x = element_text(size = font_size, color = "black"),
+    axis.text.y = element_text(size = font_size, color = "black"),
+    axis.line = element_line(),
+    
+    strip.background =element_rect(fill="white"),
+    strip.text = element_text(size = font_size)
+)
+
+colors = pal_nejm("default")(8)
+
+panel_theme = function(p,tag) {
+p = p+labs(tag = tag) + 
+  theme(plot.margin = unit(c(0,0,0,0), 'mm'),
+        plot.tag = element_text(size =8, face = "bold"))
+  return(p)
+}
+
+```
+
+# Input data
+```{r}
+# Individual-level phenotypic, sequencing reads and genotyping array data are available to approved researchers at https://www.ukbiobank.ac.uk/enable-your-research
+
+# individual-level clinical and genomic data from the UK Biobank (UKBB) in wide format
+M_wide = readRDS("Restricted/M_wide_050824.rds")
+
+# UKBB participants
+pop = unique(M_wide$eid)
+length(pop) #428530
+
+# individual-level pathogenic germline variants (PGVs)
+germline_c = readRDS("Restricted/germline_050824.rds")
+
+# individual-level CH calls
+ch_c = readRDS("Restricted/ch_050824.rds")
+mCA = readRDS("Restricted/mCA_050824.rds") %>% mutate(eid=as.character(eid))
+
+# germline gene annotation
+germline_ann = read_xlsx("Inputs/germline_ann.xlsx")
+length(unique(germline_ann$gene)) #236
+
+# number of germline carriers by gene
+germline_count = M_wide %>% dplyr::select(starts_with("g_")) %>%
+    colSums() %>%
+    as.data.frame %>%
+    setNames('n') %>%
+    tibble::rownames_to_column('germline')  %>%
+    arrange(-n) %>%
+    mutate(gene=str_remove(germline, "g_"),
+           gene_label=paste(gene," (n=",n,")")) %>%
+  left_join(.,germline_ann,by='gene')
+
+# CH categories
+ch_cat = read_xlsx("Inputs/ch_cat.xlsx")
+
+```
+
+# Statistics
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# % of germline carriers
+sum(M_wide$germline)/length(pop)*100
+
+# % of people having pathogenic germline variants (PGVs) in a gene with a dominant inheritance mode 
+sum(M_wide$Dominant)/length(pop)*100
+
+# % of people having PGVs in a gene with a recessive inheritance mode 
+sum(M_wide$Recessive)/length(pop)*100
+
+# % of heterozygous germline carriers
+100-((M_wide %>% dplyr::select(ends_with("_comp")) %>% colSums() %>% sum())/length(pop)*100)
+
+#  number of germline carriers were homozygous or carrying two different PGVs in the same gene (potential compound heterozygous carriers)
+M_wide %>% dplyr::select(ends_with("_comp")) %>%
+  colSums() %>%
+  as.data.frame %>%
+  setNames('n') %>%
+  tibble::rownames_to_column('germline')  %>%
+  arrange(-n) %>% pull(n) %>% sum() 
+
+# number of participants having PGVs in multiple genes with a dominant inheritance mode
+sum(M_wide$multi_dom)
+
+# % of participants having PGVs in multiple genes with a dominant inheritance mode
+sum(M_wide$multi_dom)/length(pop)*100
+  
+```
+
+# Regression (model demonstration)
+```{r}
+################################################################# germline-CH 
+D = M_wide
+
+gene_list = D %>% dplyr::select(starts_with("g_")) %>% colnames()
+ch_list = unlist(lapply(c("ch_","c_","cnv_","chr"), function(gene) grep(gene, colnames(M_wide), value = TRUE)))
+
+# covariates for regression
+MV = c('ageBaseline',"PC1","PC2","PC3","batch")
+
+logistf_gene_var = list()
+for (event in ch_list) {
+
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+        ncooccur=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = D %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D,
+            na.action = 'na.omit',
+            pl=FALSE
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]),
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+
+# UKBB results were saved into Inputs/g_ch_ukb_c.rds
+# results for all cohorts were saved into Inputs/logistic_combined2.rds
+
+################################################################# germline-heme (for genes significantly associated with CH)
+D = M_wide
+
+gene_list = readRDS("Inputs/logistic_combined2.rds") %>% filter(analysis%in%c("gene-overall","additional")) %>% filter(p_fdr<0.05) %>% pull(germline) %>% unique()
+interest_events = c("Myeloid","Lymphoid")
+
+cox_gene_var <- list()
+for (event in interest_events) {
+
+    exposure_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(exposure_list)
+    time = paste0("survtime_",event)
+    for (term in exposure_list) {
+        print(paste0(term,"-",event,"-",time))
+        nexposure = D %>% filter(get(term)==1) %>% nrow()
+        noutcome = D %>% filter(get(event)==1) %>% nrow()
+        ncooccur = D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        cox <- coxph(formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(MV, collapse = "+"), "+ get(term)")), 
+                     data= D, na.action=na.omit)
+        cox_data <- cox %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=cox$n,
+           missing = length(cox$na.action),
+           nexposure = nexposure,
+           noutcome =  noutcome,
+           ncooccur=ncooccur) %>%
+          cbind(outcome = event,
+          exposure=term,
+          survtime=time)
+        cox_gene_var <- rbind(cox_gene_var, cox_data)
+    }
+}
+
+o = cox_gene_var %>% filter(grepl("term",term))
+saveRds(o,"Inputs/g_heme.rds")
+
+################################ germline -> heme subtype (for genes significantly associated with both CH and hematologic malignancies)
+D = M_wide
+
+gene_list = readRDS("Inputs/g_heme.rds") %>% filter(p.value<0.05) %>% filter(grepl("g_",exposure)) %>% pull(exposure) %>% unique() # 16
+interest_events = c("Secondary","AML","MPN","MDS","MDS/MPN","CML","Other Myeloid","NHL","HL","ALL","CLL","Other Lymphoid","MM","Other Plasma","Other Hematopoietic")
+
+cox_gene_var <- list()
+for (event in interest_events) {
+
+    exposure_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(exposure_list)
+    time = paste0("survtime_",event)
+    for (term in exposure_list) {
+        print(paste0(term,"-",event,"-",time))
+        nexposure = D %>% filter(get(term)==1) %>% nrow()
+        noutcome = D %>% filter(get(event)==1) %>% nrow()
+        ncooccur = D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        cox <- coxph(formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(MV, collapse = "+"), "+ get(term)")), 
+                     data= D, na.action=na.omit)
+        cox_data <- cox %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=cox$n,
+           missing = length(cox$na.action),
+           nexposure = nexposure,
+           noutcome =  noutcome,
+           ncooccur=ncooccur) %>%
+          cbind(outcome = event,
+          exposure=term,
+          survtime=time)
+        cox_gene_var <- rbind(cox_gene_var, cox_data)
+    }
+}
+
+o = cox_gene_var %>% filter(grepl("term",term))
+saveRds(o,"Inputs/g_heme_subtype.rds") 
+
+##################################################################### g + CH -> heme
+# germline-ch interaction
+# overall 
+D = M_wide %>%
+  mutate(ch_all=pmax(ch_heme,cnv_auto)) %>%
+  filter(ch_all==1)
+cox <- coxph(formula = as.formula(paste0("Surv(survtime_heme, heme) ~",paste(MV, collapse = "+"), "+ germline")), 
+                     data= D, na.action=na.omit)
+cox_data <- cox %>% sjPlot::get_model_data(type="est")
+
+# for genes significantly associated with both CH and hematologic malignancies
+gene_list = readRDS("Inputs/g_heme.rds") %>% filter(p.value<0.05) %>% filter(grepl("g_",exposure)) %>% pull(exposure) %>% unique() # 16
+interest_events = c("Myeloid","Lymphoid")
+
+D = M_wide %>%
+  mutate(
+    ch_all=case_when(
+      ch_heme==1|cnv_auto==1 ~ 1,
+      #ch_pd==1|ch_cnv==1 ~ 1,
+      TRUE ~ 0
+      ),
+    Mutation = case_when(
+     germline==1&ch_all==1 ~ "Germline+CH",
+     germline==1&ch_all==0 ~ "Germline only",
+     germline==0&ch_all==1 ~ "CH only",
+     germline==0&ch_all==0 ~ "None",
+     ),
+    Mutation=factor(Mutation,levels = c("None","Germline only","CH only","Germline+CH")))
+
+# stratified hazard ratio
+cox_gene_var <- list()
+for (event in interest_events) {
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(germline_list)
+    time = paste0("survtime_",event)
+    for (term in germline_list) {
+        print(paste0(term,"-",event,"-",time))
+        # event count
+        dat = D %>% filter((germline==1&get(term)==0)==F)
+        count = t(table(dat$Mutation,dat[[event]])) %>% data.frame() %>%
+          dplyr::rename(cancer_status=Var1,mutation=Var2) %>%
+          cbind(cancer = event) %>% cbind(germline=term) %>%
+          mutate(mutation=paste0("Mutation",mutation)) %>%
+          spread(key=cancer_status,value = Freq) %>%
+          dplyr::rename(case=`1`,control=`0`)
+        # regression
+        cox <- coxph(formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(MV, collapse = "+"), "+ Mutation")), 
+                     data= dat, 
+                     na.action=na.omit)
+        cox_data <- cox %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=cox$n,
+                 nevent=cox$nevent,
+                 missing = length(cox$na.action)) %>% 
+          cbind(cancer = event,germline=term,survtime=time) %>%
+          left_join(.,count,by=c("term"="mutation","cancer"="cancer","germline"="germline"))
+        
+        cox_gene_var <- rbind(cox_gene_var, cox_data)
+    }
+} 
+
+t=cox_gene_var %>% filter(grepl("Mutation",term))
+
+# count for reference group
+count_var <- list()
+for (event in interest_events) {
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(germline_list)
+    time = paste0("survtime_",event)
+    for (term in germline_list) {
+        print(paste0(term,"-",event,"-",time))
+        # event count
+        dat = D %>% filter((germline==1&get(term)==0)==F)
+        count = t(table(dat$Mutation,dat[[event]])) %>% data.frame() %>%
+          dplyr::rename(cancer_status=Var1,mutation=Var2) %>%
+          cbind(cancer = event) %>% cbind(germline=term) %>%
+          mutate(mutation=paste0("Mutation",mutation)) %>%
+          spread(key=cancer_status,value = Freq) %>%
+          dplyr::rename(case=`1`,control=`0`)
+        
+        count_var <- rbind(count_var, count)
+    }
+} 
+
+saveRds(count_var,"Inputs/gCH_heme_count.rds")
+
+# p value for heterogeneity
+logistf_gene_var = list()
+for (event in interest_events) {
+  for (term in gene_list) {
+    ncooccur=nrow(D %>% filter(get(term)==1) %>% filter(get(event)==1) %>% filter(ch_all == 1))
+    n_ch=nrow(D %>% filter(get(term)==1) %>% filter(ch_all == 1))
+    cat(term,event)
+    logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ ch_all")),
+            data = D %>% filter(get(term)==1),
+            na.action = 'na.omit',
+            pl=TRUE,
+            control=logistf.control(maxit = 100000),
+            plcontrol=logistpl.control(maxit = 100000)
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]), 
+                 missing = length(logistf$na.action),
+                 conv1=logistf$conv[[1]],
+                 conv2=logistf$conv[[2]],
+                 conv3=logistf$conv[[3]],
+                 ncooccur=ncooccur,
+                 n_ch=n_ch) %>%
+          cbind(cancer = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+  }
+}
+phet_logistf=logistf_gene_var %>% filter(term=="ch_all")
+
+results = t %>% filter(grepl("MutationGermline",term)) %>% 
+  left_join(.,phet_logistf%>%dplyr::select(germline,cancer,p.label.logistf=p.label,p.value.logistf=p.value),by=c("germline","cancer")) %>%
+  dplyr::select(term,germline,cancer,estimate,conf.low,conf.high,p.value,p.label,group,
+                p.label.logistf,p.value.logistf,
+                total,nevent,missing,control,case)
+saveRds(results,"Inputs/gCH_heme.rds")
+
+
+##################################################################### absolute risk
+D = M_wide %>% filter(germline==0) # estimate CH risk for progression to myeloid malignacies among people without germline mutation
+
+gene_list = unlist(lapply(c("c_","chr"), function(gene) grep(gene, colnames(M_wide), value = TRUE)))
+
+cox_gene_var <- list()
+
+for (event in "Myeloid") {
+
+    ch_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(ch_list)
+    time = paste0("survtime_",event)
+    for (term in ch_list) {
+        print(paste0(term,"-",event,"-",time))
+        case=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        control=D %>% filter(get(term)==1 & get(event)==0) %>% nrow()
+        cox <- coxph(formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(MV, collapse = "+"), "+ get(term)")), 
+                     data= D, na.action=na.omit)
+        cox_data <- cox %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=cox$n,
+                 nevent=cox$nevent,
+                 missing = length(cox$na.action),
+                 case=case,
+                 control=control) %>% 
+          cbind(cancer = event) %>% cbind(germline=term)
+        cox_gene_var <- rbind(cox_gene_var, cox_data)%>% cbind(survtime=time)
+    }
+}
+# CH events that were significantly associated with myeloid malignancy risk (FDR corrected p value < 0.1)
+r = readRDS("Inputs/ch_myeloid.rds")
+ch = unique(r$ch)
+
+# individual-level blood counts
+bc=readRDS("Restricted/blood_n_050824.rds")
+
+# covar
+MV = c('ageBaseline',
+       "PC1","PC2","PC3",
+       "batch")
+
+features = unique(c(ch,"VAF_heme_bin","mutnum_heme_bin","count_auto_bin",
+                    colnames(bc)[-1],
+                    MV))
+# germline genes
+sig_genes = c("g_CHEK2","g_ATM") # most common
+
+# event
+event = "Myeloid"
+time = paste0("survtime_",event)
+
+# age interval
+age_start = 50
+age_end = 75
+
+
+# age specific incidence for event (comparable inc between seer and cancer research uk)
+seer_myeloid = readxl::read_xlsx("Inputs/myeloid_inc_seer.xlsx") %>%
+  dplyr::select(age_start, age_end, rate) %>%
+  mutate(range = age_end-age_start+1) %>%
+  dplyr::slice(rep(1:n(), range)) %>%
+  arrange(age_start) %>%
+  mutate(age=row_number()-1) %>%
+  dplyr::select(age,rate) %>%
+  filter(age>=age_start&age<age_end)
+colnames(seer_myeloid)=c("Ages","Rates")
+
+# age specific all cause mortality
+uk_mort = readxl::read_xlsx("Inputs/mort_inc_uk.xlsx", sheet = "mortality_age") %>%
+  dplyr::select(age, qx) %>%
+  filter(age>=age_start&age<age_end)
+colnames(uk_mort)=c("Ages","Rates")
+
+D = M_wide %>% filter(ageBaseline>=age_start&ageBaseline<age_end) %>%
+  left_join(.,bc,by='eid') %>%
+  dplyr::select("eid","germline",any_of(sig_genes),any_of(features),any_of(event),any_of(time),"survtime_All_mortality", "All_mortality","VAF_heme","mutnum_heme","count_auto") %>%
+  mutate(
+         mutnum_heme_bin = case_when(
+           mutnum_heme==0~"0",
+           mutnum_heme==1~"1",
+           mutnum_heme==2~"2",
+           mutnum_heme>=3~"3"
+         ),
+         count_auto_bin = case_when(
+           count_auto==0~"0",
+           count_auto==1~"1",
+           count_auto==2~"2",
+           count_auto>=3~"3"
+         ),
+         VAF_heme_bin = case_when(
+           VAF_heme==0~"0",
+           VAF_heme<0.1~"1",
+           VAF_heme<0.2~"2",
+           VAF_heme>=0.2~"3"
+         ),
+         mutnum_heme_bin=as.numeric(mutnum_heme_bin),
+         count_auto_bin=as.numeric(count_auto_bin),
+         VAF_heme_bin=as.numeric(VAF_heme_bin)
+         ) %>%
+  distinct() %>%
+  drop_na()
+
+risk_ratio = sum(seer_myeloid$Rates)/(sum(D$Myeloid)/nrow(D))
+cat(risk_ratio) # UKB risk 1.67 times lower
+mort_ratio = sum(uk_mort$Rates)/(sum(D$All_mortality)/nrow(D))
+cat(mort_ratio) # UKB risk 2.67 times lower
+
+inc_myeloid=seer_myeloid %>% mutate(Rates=Rates/risk_ratio) %>% as.matrix()
+inc_mort=uk_mort %>% mutate(Rates=Rates/mort_ratio) %>% as.matrix()
+
+######################## model
+# table_var = list()
+risk_var = list()
+
+for (gene in sig_genes) {
+# germline risk for event
+g_event = coxph(formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(MV, collapse = "+"), "+ get(gene)")), 
+                     data= D, na.action=na.omit) %>% sjPlot::get_model_data(type="est") %>% filter(term=="get(gene)") %>% pull(estimate)
+
+# germline risk for mortality
+g_mort = coxph(formula = as.formula(paste0("Surv(survtime_All_mortality, All_mortality) ~",paste(MV, collapse = "+"), "+ get(gene)")), 
+                     data= D, na.action=na.omit) %>% sjPlot::get_model_data(type="est") %>% filter(term=="get(gene)") %>% pull(estimate)
+
+inc_myeloid_g=seer_myeloid %>% mutate(Rates=Rates/risk_ratio*g_event) %>% as.matrix()
+inc_mort_g=uk_mort %>% mutate(Rates=Rates/mort_ratio*g_mort) %>% as.matrix()
+
+# formula
+formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(features, collapse = "+")))
+
+# log or
+cox <- coxph(formula = formula, 
+             data= D #%>% filter(germline==0)
+             , 
+             na.action=na.omit)
+betas <- cox %>% summary %>% .$coefficients %>% as.data.frame %>% 
+  tibble::rownames_to_column('term') %>%
+  #filter(`Pr(>|z|)`<0.05) %>%
+  dplyr::select(term, coef)
+
+# risk calculation for germline carriers vs general popultation
+features = betas$term
+Z_ref = D %>% filter(ageBaseline>=50&ageBaseline<75) %>% dplyr::select(any_of(features))
+Z_x = D %>% filter(ageBaseline>=50&ageBaseline<75) %>% filter(germline==0) %>% dplyr::select(any_of(features))
+Z_g  = D %>% filter(ageBaseline>=50&ageBaseline<75) %>% filter(get(gene)==1) %>% dplyr::select(any_of(features))
+
+## build model
+# formula
+formula = as.formula(paste0("diagnosis ~",paste(features, collapse = "+")))
+
+# covariates info
+model_cov_info = list(); 
+model_cov_info = lapply(features, function(x){list(name = x, type = 'continuous')})
+
+# ref
+res_x = iCARE::computeAbsoluteRisk(
+  model.formula = formula,
+  model.cov.info = model_cov_info,
+  model.ref.dataset = Z_ref,
+  model.log.RR = as.matrix(unname(tibble::column_to_rownames(betas, 'term'))),
+  model.disease.incidence.rates = inc_myeloid,
+  model.competing.incidence.rates = inc_mort[c(1:nrow(inc_myeloid)),],
+  apply.age.start = age_start,
+  apply.age.interval.length = age_end-age_start-1,
+  apply.cov.profile = Z_x,
+  return.refs.risk = TRUE
+)
+
+# germline carriers
+res_g = iCARE::computeAbsoluteRisk(
+  model.formula = formula,
+  model.cov.info = model_cov_info,
+  model.ref.dataset = Z_ref,
+  model.log.RR = as.matrix(unname(tibble::column_to_rownames(betas, 'term'))),
+  model.disease.incidence.rates = inc_myeloid_g,
+  model.competing.incidence.rates = inc_mort_g[c(1:nrow(inc_myeloid_g)),],
+  apply.age.start = age_start,
+  apply.age.interval.length = age_end-age_start-1,
+  apply.cov.profile = Z_g,
+  return.refs.risk = TRUE
+)
+
+D_ref = data.frame(
+  risk = as.vector(res_x$risk/risk_ratio),
+  Z_x) %>% mutate(Population = "Non-carriers")
+
+D_g = data.frame(
+  risk = as.vector(res_g$risk/risk_ratio),
+  Z_g) %>% mutate(Population = paste0(str_remove(gene,"g_")," carriers"))
+
+D_combined = rbind(D_ref, D_g)
+
+risk = D_combined %>% dplyr::select(risk,Population) %>% cbind(gene=gene,event=event)
+risk_var = rbind(risk_var,risk)
+}
+
+write.table(risk_var, "Inputs/absolute_risk.txt", col.names = T, row.names = F, quote = F, sep = "\t")
+
+##################################################################### germline selected CH
+D = M_wide %>% 
+  mutate(ch_all=case_when(
+      ch_pd==1|ch_cnv==1 ~ 1,
+      TRUE ~ 0
+      ))
+
+######### mutation combined
+merged = Reduce(
+    x = list(germline_c %>% dplyr::select(c("eid","symbol","inh","Consequence_cat","ID_hg38")) %>%
+               dplyr::rename_with(function(x) paste0("g_", x),-eid),
+             ch_c %>% dplyr::select(c("eid","symbol")) %>%
+               dplyr::rename_with(function(x) paste0("c_", x),-eid),
+             mCA %>% dplyr::select(c("eid","cnv_label","chrom"))
+             ), 
+    f = function(x, y) {dplyr::full_join(x, y, by = 'eid')}) %>% distinct() %>%
+  right_join(., M_wide %>% dplyr::select(c("eid","heme","Myeloid","Lymphoid")),by='eid') %>%
+  mutate(key1=paste0("g_",g_symbol,"+c_",c_symbol),
+         key2=paste0("g_",g_symbol,"+",cnv_label)) 
+
+########
+gene_list = D %>% dplyr::select(starts_with("g_")) %>% colnames()
+ch_list = unlist(lapply(c("ch_","c_","cnv_","chr"), function(gene) grep(gene, colnames(M_wide), value = TRUE)))
+
+# covariates
+MV = c('ageBaseline',"PC1","PC2","PC3","batch")
+
+logistf_gene_var = list()
+for (event in ch_list) {
+
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+        ncooccur=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = D %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D,
+            na.action = 'na.omit',
+            pl=FALSE
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]),
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+
+# results were saved to Inputs/g_ch_detailed.rds
+association =  readRDS("Inputs/g_ch_detailed.rds") %>%
+  filter(p.value<0.05) %>%
+  filter(estimate>=1.5) %>%
+  mutate(ch2=str_replace_all(ch,c("_pq"="","chr"="","_p"="p","_q"="q","_CNLOH"="=","_Loss"="-","_Gain"="+"))) %>%
+  mutate(key=paste0(germline,"+",ch2)) 
+
+D1 = merged %>% 
+  mutate(high1=ifelse(key1%in%association$key,1,0),
+         high2=ifelse(key2%in%association$key,1,0),
+         high=pmax(high1,high2)) %>% 
+  dplyr::select(eid,high) %>%
+  group_by(eid) %>%
+  summarise(ch_high=max(high)) %>% 
+  left_join(.,D %>% dplyr::select("eid","germline","ch_all","heme","Myeloid","Lymphoid",
+                                  "survtime_heme","survtime_Myeloid","survtime_Lymphoid",any_of(MV)),
+            by="eid") %>%
+    mutate(mutation=ifelse(ch_all==0,"None","ch_other"),
+           mutation=ifelse(ch_high==1,"ch_high",mutation),
+           mutation=factor(mutation,levels=c("None","ch_other","ch_high")))
+
+gene_list = c("germline")
+event_list = c("Lymphoid","Myeloid")
+cox_gene_var = list()
+for(term in gene_list) {
+  for (event in event_list) {
+    d= D1 %>% filter(germline==1)
+    
+    count = t(table(d$mutation,d[[event]])) %>% data.frame() %>%
+    dplyr::rename(cancer_status=Var1,mutation=Var2) %>%
+    cbind(cancer = event) %>% cbind(germline=term) %>%
+    mutate(mutation=paste0("mutation",mutation)) %>%
+    spread(key=cancer_status,value = Freq) %>%
+    dplyr::rename(case=`1`,control=`0`) 
+  
+  time = paste0("survtime_",event)
+  cox <- coxph(formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(MV, collapse = "+"), "+ mutation")),
+               data= d,
+               na.action=na.omit) 
+  cox_data <- cox %>% sjPlot::get_model_data(type="est") %>%
+    mutate(total=cox$n,
+           nevent=cox$nevent,
+           missing = length(cox$na.action)) %>% 
+          cbind(germline=term,cancer = event) %>%
+    left_join(.,count,by=c("term"="mutation","cancer"="cancer","germline"="germline"))
+    cox_gene_var <- rbind(cox_gene_var, cox_data)
+  }
+}
+r1=cox_gene_var %>% filter(grepl("mutation",term)==T)
+
+count_var = list()
+for(term in gene_list) {
+  for (event in event_list) {
+    d= D1 %>% filter(germline==1)
+    
+    count = t(table(d$mutation,d[[event]])) %>% data.frame() %>%
+    dplyr::rename(cancer_status=Var1,mutation=Var2) %>%
+    cbind(cancer = event) %>% cbind(germline=term) %>%
+    mutate(mutation=paste0("mutation",mutation)) %>%
+    spread(key=cancer_status,value = Freq) %>%
+    dplyr::rename(case=`1`,control=`0`) 
+    
+    count_var <- rbind(count_var, count)
+  }
+}
+c1=count_var
+
+########### individual genes
+gene_list = readRDS("Inputs/g_heme.rds") %>% filter(p.value<0.05) %>% filter(grepl("g_",exposure)) %>% pull(exposure) %>% unique() 
+# 18
+event_list = c("Lymphoid","Myeloid")
+
+association = readRDS("Inputs/g_ch_detailed.rds") %>% 
+  filter(germline%in%gene_list) %>%
+  filter(grepl("c_",ch)==T|grepl("chr",ch)==T) %>%
+  filter(p.value<0.05) %>%
+  filter(estimate>=1.5) %>%
+  filter((germline=="g_ATM"&grepl("chr11",ch))==F) # negative so remove
+
+cox_gene_var = list()
+get_column_names_with_one <- function(row) {
+  column_names <- names(df)[row == 1]
+  column_names_string <- paste(column_names, collapse = ", ")
+  return(column_names_string)
+}
+
+for (event in event_list) {
+  germline_list = filter_terms(
+        D %>% filter(multi_gene==0) %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 1
+    )
+  print(germline_list)
+
+  for (term in germline_list) {
+  D1= D  %>% filter(get(term)==1) %>% filter(multi_gene==0)
+  
+  ch_high = association %>% filter(germline == .env$term) %>%
+        filter(estimate>=1.5) %>%
+        pull(ch) %>% unique
+  
+  df = D1 %>% dplyr::select("eid",any_of(ch_high)) %>% drop_na()
+  df$ch_high <- apply(df, 1, get_column_names_with_one)
+  ch = df %>% dplyr::select(eid,ch_high)
+
+  D1=D1%>%
+    dplyr::select("eid","germline","ch_all","heme",
+                  "Myeloid","Lymphoid","survtime_heme","survtime_Myeloid","survtime_Lymphoid",
+                  any_of(MV)) %>%
+    cbind(gene=term) %>% 
+    right_join(.,ch,by='eid') %>% 
+    mutate(high=ifelse(ch_high!="",1,0)) %>%
+    mutate(other=ifelse(high==1,0,ch_all),
+           mutation=ifelse(ch_all==0,"None","ch_other"),
+           mutation=ifelse(high==1,"ch_high",mutation),
+           mutation=factor(mutation,levels=c("None","ch_other","ch_high")))
+  
+t=D1 %>% filter(ch_high!="") %>% pull(ch_high) %>% table() %>% sort()
+high_ch=paste(names(t), t, sep = ':', collapse = '; ')
+
+count = t(table(D1$mutation,D1[[event]])) %>% data.frame() %>%
+  dplyr::rename(cancer_status=Var1,mutation=Var2) %>%
+  cbind(cancer = event) %>% cbind(germline=term) %>%
+  mutate(mutation=paste0("mutation",mutation)) %>%
+  spread(key=cancer_status,value = Freq) %>%
+  dplyr::rename(case=`1`,control=`0`) 
+
+if (min(count$case)>0) {
+  time = paste0("survtime_",event)
+  cox <- coxph(formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(MV, collapse = "+"), "+ mutation")),
+               data= D1,
+               na.action=na.omit) 
+  cox_data <- cox %>% sjPlot::get_model_data(type="est") %>%
+    mutate(total=cox$n,
+           nevent=cox$nevent,
+           missing = length(cox$na.action),
+           high_ch=high_ch) %>% 
+          cbind(germline=term,cancer = event) %>%
+    left_join(.,count,by=c("term"="mutation","cancer"="cancer","germline"="germline"))
+    cox_gene_var <- rbind(cox_gene_var, cox_data)
+  }
+ }
+}
+
+sig_heme = readRDS("Inputs/g_heme.rds") %>% filter(grepl("term",term)) %>% filter(p.value<0.05) %>% mutate(key=paste0(exposure,"+",outcome)) %>% pull(key) %>% unique()
+r2 = cox_gene_var %>% dplyr::select(-c("high_ch","xpos","xmin","xmax")) %>% 
+  filter(grepl("mutation",term)==T) %>%
+  filter(cancer!="heme") %>%
+  mutate(estimate=as.numeric(estimate)) %>%
+  mutate(gene=str_replace(germline,"g_","")) %>%
+  mutate(conf.low=ifelse(case==0,0,conf.low),
+         conf.high=ifelse(case==0,0,conf.high),
+         estimate=ifelse(case==0,0,estimate),
+         term=str_replace(term,"mutation","")) %>% 
+  filter(germline%!in%germline[case<2]) %>%
+  filter(paste0(germline,"+",cancer)%in%sig_heme)
+o = bind_rows(r1,r2)
+
+saveTxt(o,"Inputs/g_selectedCH.txt")
+
+count_var = list()
+get_column_names_with_one <- function(row) {
+  column_names <- names(df)[row == 1]
+  column_names_string <- paste(column_names, collapse = ", ")
+  return(column_names_string)
+}
+
+for (event in event_list) {
+  germline_list = filter_terms(
+        D %>% filter(multi_gene==0) %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 1
+    )
+  print(germline_list)
+
+  for (term in germline_list) {
+  D1= D  %>% filter(get(term)==1) %>% filter(multi_gene==0)
+  
+  ch_high = association %>% filter(germline == .env$term) %>%
+        filter(estimate>=1.5) %>%
+        pull(ch) %>% unique
+  
+  df = D1 %>% dplyr::select("eid",any_of(ch_high)) %>% drop_na()
+  df$ch_high <- apply(df, 1, get_column_names_with_one)
+  ch = df %>% dplyr::select(eid,ch_high)
+
+  D1=D1%>%
+    dplyr::select("eid","germline","ch_all","heme",
+                  "Myeloid","Lymphoid","survtime_heme","survtime_Myeloid","survtime_Lymphoid",
+                  any_of(MV)) %>%
+    cbind(gene=term) %>% 
+    right_join(.,ch,by='eid') %>% 
+    mutate(high=ifelse(ch_high!="",1,0)) %>%
+    mutate(other=ifelse(high==1,0,ch_all),
+           mutation=ifelse(ch_all==0,"None","ch_other"),
+           mutation=ifelse(high==1,"ch_high",mutation),
+           mutation=factor(mutation,levels=c("None","ch_other","ch_high")))
+  
+t=D1 %>% filter(ch_high!="") %>% pull(ch_high) %>% table() %>% sort()
+high_ch=paste(names(t), t, sep = ':', collapse = '; ')
+
+count = t(table(D1$mutation,D1[[event]])) %>% data.frame() %>%
+  dplyr::rename(cancer_status=Var1,mutation=Var2) %>%
+  cbind(cancer = event) %>% cbind(germline=term) %>%
+  mutate(mutation=paste0("mutation",mutation)) %>%
+  spread(key=cancer_status,value = Freq) %>%
+  dplyr::rename(case=`1`,control=`0`) 
+
+if (min(count$case)>0) {
+    count_var <- rbind(count_var, count)
+  }
+ }
+}
+c2=count_var
+
+count = bind_rows(c1,c2)
+
+saveTxt(count,"Inputs/g_selectedCH_count.txt")
+
+#################################################################################### germline-CH count (logistic)
+D = M_wide %>%
+  mutate(
+    num_bin_heme = case_when(
+      mutnum_heme==0~"0",
+      mutnum_heme==1~"1",
+      mutnum_heme==2~"2",
+      mutnum_heme>=3~"3+"
+         ),
+    num_bin_auto = case_when(
+      count_auto==0~"0",
+      count_auto==1~"1",
+      count_auto==2~"2",
+      count_auto>=3~"3+")
+    ) %>%
+  distinct()
+
+num_heme = D %>% mutate(num_bin_heme=paste0("mutnum_heme_",num_bin_heme)) %>%
+  reshape2::dcast(
+    formula = eid ~ num_bin_heme,
+    value.var = 'num_bin_heme',
+    fun.aggregate = function(x) {min(1, length(x))}
+)
+
+num_auto = D %>% filter(is.na(num_bin_auto)==F)%>%
+  mutate(num_bin_auto=paste0("mutnum_auto_",num_bin_auto)) %>%
+  reshape2::dcast(
+    formula = eid ~ num_bin_auto,
+    value.var = 'num_bin_auto',
+    fun.aggregate = function(x) {min(1, length(x))}
+)
+
+D1 = D %>% left_join(.,num_heme,by="eid") %>% left_join(.,num_auto,by="eid")
+
+gene_list = c("germline","Dominant","Recessive")
+
+############ mut number in ch_heme gene
+ch_list = c("mutnum_heme_1","mutnum_heme_2","mutnum_heme_3+") 
+
+logistf_gene_var = list()
+
+for (event in ch_list) {
+    d = D1 %>% filter(get(event)==1|mutnum_heme==0)
+    germline_list = filter_terms(
+        d %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 0
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+        ncooccur=d %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = d %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = d,
+            na.action = 'na.omit',
+            pl=FALSE
+            #control=logistf.control(maxit = 1000),
+            #plcontrol=logistpl.control(maxit = 1000)
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]), 
+                 # missing = length(logistf$na.action),
+                 # conv1=logistf$conv[[1]],
+                 # conv2=logistf$conv[[2]],
+                 # conv3=logistf$conv[[3]],
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+
+
+ch_list = c("mutnum_auto_1","mutnum_auto_2","mutnum_auto_3+") 
+
+for (event in ch_list) {
+    d = D1 %>% filter(get(event)==1|count_auto==0)
+    germline_list = filter_terms(
+        d %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 0
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+        ncooccur=d %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = d %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = d,
+            na.action = 'na.omit',
+            pl=FALSE,
+            control=logistf.control(maxit = 100)
+            #plcontrol=logistpl.control(maxit = 100)
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]), 
+                 # missing = length(logistf$na.action),
+                 # conv1=logistf$conv[[1]],
+                 # conv2=logistf$conv[[2]],
+                 # conv3=logistf$conv[[3]],
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+o=logistf_gene_var %>% filter(grepl("term",term))
+saveRds(o,"Inputs/g_ch_numvaf_logistf.rds") 
+
+#################################################################################### germline-CH VAF/count (logistic)
+D = M_wide %>%
+  mutate(
+    logVAF = log(VAF_pd),
+    logVAF_heme = log(VAF_heme),
+    logCF = log(CF_all),
+    logCF_auto = log(CF_auto)
+    ) %>%
+  distinct()
+
+sig_ch = readRDS("Inputs/g_ch_ukb_c.rds") %>% filter(analysis=="gene-overall") %>% filter(ch%in%c("ch_heme","cnv_auto")) %>% pull(germline) %>% unique()
+gene_list = unique(c("germline","Dominant","Recessive",
+                     sig_ch))
+
+############ mut number
+ch_list = c("mutnum_heme", "count_auto")
+
+lm_var <- list()
+for (event in ch_list) {
+    for (term in gene_list) {
+        print(paste0(term,"-",event))
+        lm = lm(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D%>%filter(get(event)>0),
+            na.action = 'na.omit')
+        lm_data <- lm %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=length(lm[["model"]][["get(event)"]]),
+                 freq=sum(lm[["model"]][["get(term)"]])) %>% 
+          cbind(ch = event,germline=term)
+        lm_var <- rbind(lm_var, lm_data)
+    }
+}
+
+############ VAF
+ch_list = c("logVAF_heme"#,"logCF_auto"
+            )
+
+for (event in ch_list) {
+    for (term in gene_list) {
+        print(paste0(term,"-",event))
+        lm = lm(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D%>%filter(get(event)!=-Inf),
+            na.action = 'na.omit')
+        lm_data <- lm %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=length(lm[["model"]][["get(event)"]]),
+                 freq=sum(lm[["model"]][["get(term)"]])) %>% 
+          cbind(ch = event,germline=term)
+        lm_var <- rbind(lm_var, lm_data)
+    }
+}
+
+saveRds(lm_var,"Inputs/g_ch_numvaf_lm.rds")
+
+########################################################## germline mutation type -> CH/hematologic cancer
+g_conseq = germline_c %>%
+  mutate(conseq_type = ifelse(Consequence_cat=="Missense","Missense","LOF"),
+         gene_conseq = paste0("g_",symbol,"_",conseq_type)) %>%
+  reshape2::dcast(
+    formula = eid ~ gene_conseq,
+    value.var = 'gene_conseq',
+    fun.aggregate = function(x) {min(1, length(x))}
+) %>%
+  right_join(.,M_wide%>%dplyr::select(eid),by="eid")
+g_conseq[is.na(g_conseq)] <- 0
+
+D = M_wide %>% left_join(.,g_conseq,by="eid")
+
+MV = c('ageBaseline',
+       "PC1","PC2","PC3",
+       "batch")
+
+gene_list = unlist(lapply(c("g_CHEK2","g_ATM"), function(gene) grep(gene, colnames(D), value = TRUE)))
+ch_list=c("ch_heme")
+
+logistf_gene_var = list()
+
+for (event in ch_list) {
+
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 0
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+      ncooccur=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = D %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D,
+            na.action = 'na.omit',
+            pl=TRUE,
+            control=logistf.control(maxit = 100)
+            #plcontrol=logistpl.control(maxit = 1000)
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]), 
+                 missing = length(logistf$na.action),
+                 conv1=logistf$conv[[1]],
+                 conv2=logistf$conv[[2]],
+                 conv3=logistf$conv[[3]],
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+
+ch_list=c("cnv_auto")
+
+for (event in ch_list) {
+
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 0
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+      ncooccur=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = D %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D,
+            na.action = 'na.omit',
+            pl=TRUE,
+            control=logistf.control(maxit = 100)
+            #plcontrol=logistpl.control(maxit = 1000)
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]), 
+                 missing = length(logistf$na.action),
+                 conv1=logistf$conv[[1]],
+                 conv2=logistf$conv[[2]],
+                 conv3=logistf$conv[[3]],
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+
+saveRds(logistf_gene_var,"Inputs/g_type_ch.rds")
+
+################################# heme
+
+interest_events=c("Myeloid","Lymphoid")
+
+cox_gene_var <- list()
+
+for (event in interest_events) {
+
+    exposure_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 0
+    )
+    print(exposure_list)
+    time = paste0("survtime_",event)
+    for (term in exposure_list) {
+        print(paste0(term,"-",event,"-",time))
+        nexposure = D %>% filter(get(term)==1) %>% nrow()
+        noutcome = D %>% filter(get(event)==1) %>% nrow()
+        ncooccur = D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        cox <- coxph(formula = as.formula(paste0("Surv(get(time), get(event)) ~",paste(MV, collapse = "+"), "+ get(term)")), 
+                     data= D, na.action=na.omit)
+        cox_data <- cox %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=cox$n,
+           missing = length(cox$na.action),
+           nexposure = nexposure,
+           noutcome =  noutcome,
+           ncooccur=ncooccur) %>%
+          cbind(outcome = event,
+          exposure=term,
+          survtime=time)
+        cox_gene_var <- rbind(cox_gene_var, cox_data)
+    }
+}
+
+saveRds(cox_gene_var,"Inputs/g_type_heme.rds")
+
+```
+
+
+# Tables
+```{r include=FALSE}
+file_name = "Supplementary_tables.xlsx"
+file.remove(file_name)
+W = createWorkbook()
+
+title = createStyle(halign = "left", valign = "top", textDecoration = "bold", wrapText = TRUE)
+
+h = createStyle(border = "Bottom", borderColour = "black", borderStyle = "medium",
+                halign = "left", valign = "center", textDecoration = "bold", wrapText = TRUE)
+
+wrap = createStyle(halign = "left", valign = "top", wrapText = TRUE)
+
+saveSheet = function(W,s,n,t) {
+  addWorksheet(W, s)
+  # title
+  mergeCells(W, sheet = s, cols = 1:ncol(t), rows = 1)
+  openxlsx::writeData(W, sheet = s, x = n, startRow = 1)
+  setRowHeights(W, sheet = s, rows = 1, heights = "auto")
+  addStyle(W, sheet = s, style = title, rows = 1, cols = 1)
+  # table
+  openxlsx::writeData(W, sheet = s, x = t, startRow = 2, withFilter = FALSE, headerStyle = h)
+  options("openxlsx.maxWidth" = 40)
+  setColWidths(W, sheet = s, cols = 1:ncol(t), widths = "auto")
+}
+
+x = list(
+  s=paste0("ST",rep(1:12)),
+  n=paste0("Supplementary Table ",
+           c("1: UKBB demographic and clinical characteristics by germline mutation status",
+             "2: Characteristics of study cohorts",
+             "3: ICD codes for incident hematologic malignancies",
+             "4: ICD codes for history of solid tumors",
+             "5: Distribution of Germline cancer predisposition genes across cohorts",
+             "6: Distribution of Pathogenic germline variants (PGVs) across cohorts",
+             "7: CH gene panel grouped by its relevance to cancer",
+             "8: Distribution of CH-heme genes across cohorts",
+             "9: Germline genes that predispose to overall CH across cohorts",
+             "10: Associations between germline CH-predisposition genes and CH subtypes across cohorts",
+             "11: Additional germline genes that predispose to CH subtypes across cohorts",
+             "12: Associations between germline CH-predisposition genes and hematologic malignancies in the UK Biobank"
+           ))
+)
+
+############################################# ST1
+# top 5 dominant genes
+top_dom = germline_count %>% filter(`dominant gene`=="Yes") %>% .[1:5,] %>% pull(germline)
+# top 5 recessive genes
+top_rec = germline_count %>% filter(`dominant gene`=="No") %>% .[1:5,] %>% pull(germline)
+
+var = c("ageBaseline","sex","race","smokingCat",
+        "prior_Breast","prior_Genitourinary","prior_Gastrointestinal","prior_Melanoma","prior_Gynecologic",
+        "prior_Sarcoma", "prior_Headneck","prior_Endocrine","prior_Lung","prior_CNS","prior_Other_solid",
+        "solid","age_solid","heme","age_heme","Myeloid","age_Myeloid","Lymphoid","age_Lymphoid",
+        "ch_heme",
+        "cnv_auto","chr23","chr24")
+
+gene = c("germline","multi_dom","multi_rec","multi_gene",top_dom,top_rec)
+
+D = M_wide %>%
+  mutate(across(c("indexDate_solid","indexDate_heme","indexDate_Myeloid","indexDate_Lymphoid"), 
+                ~ as.numeric(difftime(.x,dob,units = "days"))/365, .names = "age_{col}" )) %>%
+  rename_at(vars(starts_with("age_")), ~ gsub("indexDate_","",.)) %>%
+  distinct() %>%
+  mutate(age_solid=ifelse(solid==0,NA,age_solid),
+         age_heme=ifelse(heme==0,NA,age_heme),
+         age_Myeloid=ifelse(Myeloid==0,NA,age_Myeloid),
+         age_Lymphoid=ifelse(Lymphoid==0,NA,age_Lymphoid)) %>%
+  dplyr::select(eid, any_of(gene), any_of(var)) %>%
+  mutate(
+  germline_gene=case_when(
+    multi_dom==1 ~ "Multiple Dominant Genes",
+    multi_gene==1 ~ "Multiple Genes",
+    g_CHEK2==1 ~ "CHEK2",
+    g_ATM==1 ~ "ATM",
+    g_BRCA2==1 ~ "BRCA2",
+    g_LZTR1==1 ~ "LZTR1",
+    g_HOXB13==1 ~ "HOXB13",
+    g_MUTYH==1 ~ "MUTYH",
+    g_GBA1==1 ~ "GBA1",
+    g_ERCC1==1 ~ "ERCC1",
+    g_ERCC2==1 ~ "ERCC2",
+    g_FANCM==1 ~ "FANCM",
+    germline==1 ~ "Other Genes"),
+  germline_gene = factor(germline_gene,levels = c("Multiple Dominant Genes",str_remove(top_dom,"g_"),str_remove(top_rec,"g_"),"Other Genes")))  %>%
+  mutate(germline=factor(germline,levels = c(0, 1), labels = c("No PGV", "PGV")))
+
+D = D %>%
+  mutate(across(colnames(D)[sapply(D, is.numeric) & colnames(D) %!in% c("ageBaseline","age_solid","age_heme","age_Myeloid","age_Lymphoid")],
+    ~factor(., levels = c(0, 1), labels = c("No", "Yes"))
+    ))
+
+levels(D$race)[levels(D$race)=="NA"]<- NA
+levels(D$smokingCat)[levels(D$smokingCat)=="NA"]<- NA
+
+label(D$ageBaseline) <- "Age (years)"
+label(D$sex) <- "Sex"
+label(D$race) <- "Race"
+label(D$smokingCat) <- "Smoking"
+label(D$prior_Breast) <- "History of Breast Cancer"
+label(D$prior_Genitourinary) <- "History of Genitourinary Cancer"
+label(D$prior_Gastrointestinal) <- "History of Gastrointestinal Cancer"
+label(D$prior_Melanoma) <- "History of Melanoma"
+label(D$prior_Gynecologic) <- "History of Gynecologic Cancer"
+label(D$prior_Sarcoma) <- "History of Sarcoma"
+label(D$prior_Headneck) <- "History of Headneck Cancer"
+label(D$prior_Endocrine) <- "History of Endocrine Cancer"
+label(D$prior_Lung) <- "History of Lung Cancer"
+label(D$prior_CNS) <- "History of Central Nervous System Cancer"
+label(D$prior_Other_solid) <- "History of Other Solid Cancer"
+label(D$ch_heme) <- "CH-heme"
+label(D$cnv_auto) <- "Autosomal mCAs"
+label(D$chr23) <- "Loss of X"
+label(D$chr24) <- "Loss of Y"
+
+label(D$solid) <- "Solid Tumors"
+label(D$age_solid) <- "Age at Diagnosis of Solid Tumors"
+label(D$heme) <- "Incident Hematologic Malignancies"
+label(D$age_heme) <- "Age at Diagnosis of Incident Hematologic Malignancies"
+label(D$Myeloid) <- "Incident Myeloid Malignancies"
+label(D$age_Myeloid) <- "Age at Diagnosis of Incident Myeloid Malignancies"
+label(D$Lymphoid) <- "Incident Lymphoid Malignancies"
+label(D$age_Lymphoid) <- "Age at Diagnosis of Incident Lymphoid Malignancies"
+
+
+t1 = table1(as.formula(paste0("~",paste(var, collapse = "+"), "| germline")),
+       data=D, overall=F) %>% as.data.frame()
+
+t2 = table1(as.formula(paste0("~",paste(var, collapse = "+"), "| germline_gene")),
+       data=D%>%filter(is.na(germline_gene)==F),overall=F) %>% as.data.frame()
+
+t = cbind(t1,t2[,2:ncol(t2)])
+
+saveSheet(W,x[["s"]][1],x[["n"]][1],t)
+######################################################### ST2-4
+
+# cohort characteristics
+t = read_xlsx("Inputs/cohorts.xlsx")
+saveSheet(W,x[["s"]][2],x[["n"]][2],t)
+addStyle(W, sheet = x[["s"]][2], style = wrap, rows = 3:(nrow(t)+2), cols = 1:ncol(t),gridExpand = TRUE)
+
+# ICD heme
+t = fread("Inputs/heme_summary.txt")
+saveSheet(W,x[["s"]][3],x[["n"]][3],t)
+addStyle(W, sheet = x[["s"]][3], style = wrap, rows = 3:(nrow(t)+2), cols = 1:ncol(t),gridExpand = TRUE)
+
+# ICD solid
+t = fread("Inputs/prior_solid_summary.txt")
+saveSheet(W,x[["s"]][4],x[["n"]][4],t)
+addStyle(W, sheet = x[["s"]][4], style = wrap, rows = 3:(nrow(t)+2), cols = 1:ncol(t),gridExpand = TRUE)
+
+########################################################## ST5, ST6, ST7, ST8
+# germline genes
+t = germline_ann %>% dplyr::select(-c(chromosome,arm)) %>%
+  left_join(.,read_xlsx("Inputs/mut_combined.xlsx", sheet = "germline_gene"), by=c("gene"="Gene")) %>%
+  arrange(-n_gene_UKBB)
+saveSheet(W,x[["s"]][5],x[["n"]][5],t)
+
+# germline LP variants
+t = read_xlsx("Inputs/mut_combined.xlsx", sheet = "germline_var")
+saveSheet(W,x[["s"]][6],x[["n"]][6],t)
+
+# CH panel
+t = ch_cat %>% arrange(gene) %>%
+  group_by(category) %>% summarise(Genes=paste0(gene, collapse = ", "))
+saveSheet(W,x[["s"]][7],x[["n"]][7],t)
+addStyle(W, sheet = x[["s"]][7], style = wrap, rows = 3:(nrow(t)+2), cols = 1:ncol(t),gridExpand = TRUE)
+
+# CH cat
+t = ch_cat %>% 
+  left_join(.,read_xlsx("Inputs/mut_combined.xlsx", sheet = "ch_heme"),by=c("gene"="Gene"))
+saveSheet(W,x[["s"]][8],x[["n"]][8],t)
+
+########################################################## ST9, ST10, ST11
+# germline-CH associations (Firth's logistic regression)
+r = readRDS("Inputs/logistic_combined2.rds") %>%
+  dplyr::select(-c("germline","inh","heme_gene","ch2","overlap","germline_chr",starts_with("p.stars"),starts_with("q.stars")),
+                "germline"="symbol","germline_chromosome_arm"="germline_arm")
+
+sig_ch = r %>% filter(ch=="ch_heme") %>% filter(p_fdr<0.1) %>% pull(germline) %>% unique()
+sig_cnv = r %>% filter(ch=="cnv_auto") %>% filter(p_fdr<0.1) %>% pull(germline) %>% unique()
+sig_gene = unique(c(sig_ch,sig_cnv))
+
+# germline gene annotation
+ann = germline_ann %>%
+  dplyr::select("germline"="gene","hematologic cancer predisposition gene","inheritance mode for hematolgic cancer")
+
+# Germline genes-CH overall
+t = ann %>% right_join(.,r %>% filter(analysis=="gene-overall") %>% filter(p_fdr<0.05), by="germline") %>%
+  arrange(p.value_FE) %>%
+  dplyr::select(-analysis)
+saveSheet(W,x[["s"]][9],x[["n"]][9],t)
+
+# Germline genes-CH subtypes"
+t = ann %>% right_join(.,r %>% filter(analysis=="gene-subtype") %>% filter(p.value<0.05), by="germline") %>%
+  dplyr::select(-analysis)
+saveSheet(W,x[["s"]][10],x[["n"]][10],t)
+
+# Additional germline genes-CH
+t = ann %>% right_join(.,r %>% filter(analysis=="additional") %>% filter(p_fdr<0.05), by="germline") %>%
+  dplyr::select(-analysis)
+saveSheet(W,x[["s"]][11],x[["n"]][11],t)
+
+########################################################## ST12
+
+# Germline-heme
+cols=c("germline"="exposure","n_germline"="nexposure","cancer"="outcome","n_cancer"="noutcome","total","n_both_germline_cancer"="ncooccur",
+         "estimate","std.error","conf.low","conf.high","p.value")
+t = ann %>%
+  right_join(., readRDS("Inputs/g_heme.rds")%>% dplyr::select(any_of(cols)) %>%
+               filter(germline%in%germline[p.value<0.05]) %>% 
+               arrange(germline,p.value) %>% 
+               mutate(germline=str_remove(germline,"g_")), 
+             by="germline")
+saveSheet(W,x[["s"]][12],x[["n"]][12],t)
+
+saveWorkbook(W, file_name)
+
+
+```
+
+
+# Fig1: Mut landscape
+```{r eval=FALSE, include=FALSE}
+############################# Fig. 1a
+## germline mutation matrix
+n_gene=10
+gene_list = germline_c %>%
+  dplyr::select(symbol,n_germline,inh) %>%
+  distinct() %>%
+  arrange(inh,-n_germline) %>%
+  group_by(inh) %>%
+  dplyr::slice(1:n_gene) %>%
+  mutate(label=paste0(symbol," (n=",n_germline,")"))
+  
+D = germline_c %>%
+  mutate(label=paste0(symbol," (n=",n_germline,")")) %>%
+  filter(label%in%gene_list$label) %>% 
+  group_by(eid, label) %>%
+  summarise(n = n_distinct(Consequence_cat), 
+            variant_conc = ifelse(n==1, Consequence_cat, 'Multiple mutation')) %>%
+  ungroup()
+
+sample_list = D %>% 
+  arrange(factor(label,levels = gene_list$label), 
+          factor(variant_conc,levels = c("Multiple mutation", "Frameshift", "Missense", "Nonsense", "Splicing", "Other"))) %>% 
+  pull(eid) %>% unique()
+
+#1. getting mutation matrix
+
+mat = D %>% reshape2::dcast(formula = label ~ eid, value.var = 'variant_conc', fill = "")
+
+rownames(mat) = mat[, 1]
+mat = mat[, -1]
+mat = as.matrix(mat)
+
+mat <- mat[gene_list$label, sample_list]
+
+#2. Define features to display on plot ----------------------------------
+
+col = pal_nejm("default")(6)
+names(col) <- c("Multiple mutation", "Frameshift", "Missense", "Nonsense", "Splicing", "Other")
+      
+    # _b. Define function to extract features ---------------------------------
+ alter_fun = list(
+        background = function(x, y, w, h) {
+          grid.rect(x, y, w-unit(0.8, "mm"), h-unit(0.5, "mm"),
+                    gp = gpar(fill = "white", col = NA))
+        },
+       `Multiple mutation` = function(x, y, w, h) {
+          grid.rect(x, y, w-unit(0.8, "mm"), h-unit(0.5, "mm"),
+                    gp = gpar(fill = col[1], col = NA))
+        },
+        Frameshift = function(x, y, w, h) {
+          grid.rect(x, y, w-unit(0.8, "mm"), h-unit(0.5, "mm"),
+                    gp = gpar(fill = col[2], col = NA))
+        },
+        Missense = function(x, y, w, h) {
+          grid.rect(x, y, w-unit(0.8, "mm"), h-unit(0.5, "mm"),
+                    gp = gpar(fill = col[3], col = NA))
+        },
+        Nonsense = function(x, y, w, h) {
+          grid.rect(x, y, w-unit(0.8, "mm"), h-unit(0.5, "mm"),
+                    gp = gpar(fill = col[4], col = NA))
+        },
+        Splicing = function(x, y, w, h) {
+          grid.rect(x, y, w-unit(0.8, "mm"), h-unit(0.5, "mm"),
+                    gp = gpar(fill = col[5], col = NA))
+        },
+        Other = function(x, y, w, h) {
+          grid.rect(x, y, w-unit(0.8, "mm"), h-unit(0.5, "mm"),
+                    gp = gpar(fill = col[6], col = NA))
+        }
+      )
+      
+#3. annotation
+#ha = anno_oncoprint_barplot()
+
+#4. plot ----------------------------------------------------------------
+  # The get_type function is import to split up multiple mutations in 1 cell
+
+dominant_recessive_colors = c("Dominant" = col[[1]], "Recessive" = col[[2]])
+gene_list$label_color = dominant_recessive_colors[gene_list$inh]
+
+p = oncoPrint(mat, 
+          alter_fun = alter_fun, 
+          col = col, 
+          row_order = rownames(mat), 
+          column_order = colnames(mat),
+          show_pct = F,
+          top_annotation = NULL,
+          right_annotation = NULL,
+          row_names_side = "left",
+          row_names_gp = gpar(col = gene_list$label_color, fontsize = font_size, fontface = "italic"),
+          row_split = gene_list$inh,
+          row_title_side = "left",
+          row_title_gp = gpar(fontsize = font_size, fontface="bold"),
+          alter_fun_is_vectorized = FALSE,
+          use_raster = TRUE,
+          heatmap_legend_param = list(
+            title = "Alterations",
+            labels = c("Multiple mutation", "Frameshift", "Missense", "Nonsense", "Splicing", "Other"),
+            at = c("Multiple mutation", "Frameshift", "Missense", "Nonsense", "Splicing", "Other"),
+            legend_direction = "horizontal",
+            nrow = 1,
+            title_position = "topleft",
+            title_gp = gpar(fontsize = 6, fontface = "bold"),
+            labels_gp = gpar(fontsize = 6))
+          )
+
+pdf(paste0("Figures/","Fig.1a.pdf"), width = 100/25.4, height = 115/25.4)
+par(mar=c(0,0,0,0))
+draw(p, heatmap_legend_side ="top")
+dev.off()
+
+png(paste0("Figures/","Fig.1a.png"), width = 100, height = 115, units = "mm", res = 300)
+par(mar=c(0,0,0,0))
+draw(p, heatmap_legend_side ="top")
+dev.off()
+
+############################# Fig. 1b Age plot
+D = M_wide %>% mutate(
+         germ_cat = case_when(
+           Dominant==1~"Dominant",
+           Recessive==1~"Recessive",
+           TRUE~"None"
+         ),
+         germ_cat = factor(germ_cat,levels = c("None","Recessive","Dominant")))
+
+table(D$germ_cat) %>% as.matrix()
+table(D$germline) %>% as.matrix()
+
+# UKBB regression results
+r = readRDS("Inputs/g_ch_ukb_c.rds") %>% filter(germline%in%c("Dominant","Recessive") & ch%in%c("ch_heme","cnv_auto")) %>%
+  dplyr::select(germline,ch,estimate,conf.low,conf.high) %>% distinct()
+
+r_ch = r %>%
+  filter(ch=="ch_heme") %>%
+  mutate(label = paste0("OR (95% CI)\nDominant: ",round(estimate[germline=="Dominant"],2)," (",
+                        round(conf.low[germline=="Dominant"],2),"-",round(conf.high[germline=="Dominant"],2),")",
+                        "\nRecessive: ",round(estimate[germline=="Recessive"],2)," (",
+                        round(conf.low[germline=="Recessive"],2),"-",round(conf.high[germline=="Recessive"],2),")"))
+r_mca = r %>%
+  filter(ch=="cnv_auto") %>%
+  mutate(label = paste0("OR (95% CI)\nDominant: ",round(estimate[germline=="Dominant"],2)," (",
+                        round(conf.low[germline=="Dominant"],2),"-",round(conf.high[germline=="Dominant"],2),")",
+                        "\nRecessive: ",round(estimate[germline=="Recessive"],2)," (",
+                        round(conf.low[germline=="Recessive"],2),"-",round(conf.high[germline=="Recessive"],2),")"))
+
+t_ch = D %>% dplyr::select(eid, age_cat, germ_cat, ch_heme) %>%
+        group_by(age_cat,germ_cat) %>%
+        summarise(CH = sum(ch_heme,na.rm = T), total = n()) %>% 
+        filter(!is.na(age_cat)) %>%
+        mutate(freq = CH / total) %>%
+  ungroup() %>% 
+  rowwise() %>% 
+  mutate(lower = prop.test(CH, total, conf.level = .95)$conf.int[1], 
+         upper = prop.test(CH, total, conf.level = .95)$conf.int[2]) %>% 
+  mutate(germ_cat=factor(germ_cat,levels = c("Dominant","Recessive","None")),
+         type="CH-heme") %>%
+  ungroup()
+
+t_mca = D %>% dplyr::select(eid, age_cat, germ_cat, cnv_auto) %>%
+        group_by(age_cat,germ_cat) %>%
+        summarise(CH = sum(cnv_auto,na.rm = T), total = n()) %>% 
+        filter(!is.na(age_cat)) %>%
+        mutate(freq = CH / total) %>%
+  ungroup() %>% 
+  rowwise() %>% 
+  mutate(lower = prop.test(CH, total, conf.level = .95)$conf.int[1], 
+         upper = prop.test(CH, total, conf.level = .95)$conf.int[2]) %>% 
+  mutate(germ_cat=factor(germ_cat,levels = c("Dominant","Recessive","None")),
+         type="mCA-auto") %>%
+  ungroup()
+
+t = bind_rows(t_ch,t_mca)
+levels(t$age_cat) <- c("[35,45]","(45,50]","(50,55]","(55,60]","(60,65]","(65,74]")
+  
+labels = data.frame(
+  label = c(r_ch$label[1],r_mca$label[1]),
+  type   = c("CH-heme","mCA-auto"),
+  x     = "(65,74]",
+  y     = 1
+)
+
+p2 = ggplot(
+    t,
+    aes(x = age_cat,
+        y = freq*100,
+        color = germ_cat,
+        fill = germ_cat,
+        group = germ_cat
+        )
+) +
+    geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = T, level= 0.95, alpha = 0.2, linewidth =0.5) +
+    facet_grid(.~factor(type, levels=c("CH-heme", "mCA-auto"))) +
+    xlab("Age") +
+    ylab("CH prevalence (%)") +
+    plot_theme +
+    theme(axis.text.x = element_text(angle = 45,vjust=1,hjust=1),
+        legend.position = c(1, 1),
+        legend.justification = c("right", "top"),
+        legend.key.size = unit(2, 'mm')) +
+  geom_text(inherit.aes = F,data=labels, mapping = aes(x = x, y = y, label = label), size = 5/.pt, hjust=1) +
+  scale_y_continuous(limits = c(0,12),breaks = c(3,6,9,12)) +
+  scale_fill_manual(name="Germline carrier status", labels = c("Dominant", "Recessive","None"), values = c(colors[1],colors[2],"dark grey")) +
+  scale_color_manual(name="Germline carrier status", labels = c("Dominant", "Recessive","None"), values = c(colors[1],colors[2],"dark grey"))
+
+
+############################################################# CH prevalence by germline status
+
+######## CH-heme
+n_noncarrier = table(M_wide$germline)[[1]]
+n_carrier = table(M_wide$germline)[[2]]
+
+D_ch = ch_c %>% filter(CH_cat!="other_cancer") %>%
+  mutate(germline=ifelse(eid%in%germline_c$eid,1,0)) %>%
+    reshape2::dcast(
+        formula = symbol + germline ~ .,
+        value.var = 'eid',
+        fun.aggregate = function(x) {n_distinct(x)}
+    ) %>%
+    dplyr::rename("n_patient" = ".",
+                  "ch" = "symbol") %>%
+    mutate(
+      prop_patient = case_when(
+            germline == 1 ~ (n_patient/n_carrier)*100,
+            germline == 0 ~ (n_patient/n_noncarrier)*100
+        )
+    ) %>%
+    group_by(ch) %>%
+    mutate(n_total = sum(n_patient)) %>%
+    arrange(-n_total) %>%
+    .[1:20,] %>%
+    mutate(germline = factor(germline, c(0, 1)),
+           type = "CH-heme"
+    ) %>% ungroup()
+
+t = D_ch %>% group_by(ch) %>% mutate(increase=ifelse(prop_patient[germline==1]>prop_patient[germline==0],1,0)) %>% filter(increase==1) %>% pull(ch) %>% unique()
+
+
+######## mCA-auto
+n_noncarrier = table(M_wide$germline[is.na(M_wide$ch_cnv)==F])[[1]]
+n_carrier = table(M_wide$germline[is.na(M_wide$ch_cnv)==F])[[2]]
+
+D_mca = mCA %>%
+    mutate(germline=ifelse(eid%in%germline_c$eid,1,0)) %>%
+    mutate(ch=cnv_label) %>%
+    reshape2::dcast(
+        formula = ch + germline ~ .,
+        value.var = 'eid',
+        fun.aggregate = function(x) {n_distinct(x)}
+    ) %>%
+    dplyr::rename("n_patient" = ".") %>%
+    mutate(
+      prop_patient = case_when(
+            germline == 1 ~ (n_patient/n_carrier)*100,
+            germline == 0 ~ (n_patient/n_noncarrier)*100
+        )
+    ) %>%
+    group_by(ch) %>%
+    mutate(n_total = sum(n_patient)) %>%
+    arrange(-n_total) %>%
+    filter(ch%!in%c("24-","23-")) %>%
+    filter(grepl("\\?",ch)==F) %>%
+    .[1:20,] %>%
+    mutate(germline = factor(germline, c(0, 1)),
+           type = "mCA-auto"
+    ) %>% ungroup()
+
+D = bind_rows(D_ch, D_mca)
+
+
+#### p value
+# ch_list = D %>% pull(ch) %>% unique()
+# 
+# D = M_wide
+# 
+# gene_list = c("germline")
+# 
+# # covariates for regression
+# MV = c('ageBaseline',"PC1","PC2","PC3","batch")
+# 
+# logistf_gene_var = list()
+# for (event in ch_list) {
+# 
+#     germline_list = filter_terms(
+#         D %>% filter(get(event) == 1),
+#         gene_list,
+#         verbose = T,
+#         threshold = 2
+#     )
+#     print(germline_list)
+#     for (term in germline_list) {
+#         print(paste0(term,"-",event))
+#         
+#         ncooccur=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+#         n_germline = D %>% filter(get(term)==1) %>% nrow()
+#         
+#         logistf = logistf(
+#             formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+#             data = D,
+#             na.action = 'na.omit',
+#             pl=FALSE
+#             )
+#         logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+#           mutate(total=logistf$n, 
+#                  nevent=sum(logistf$model[["get(event)"]]),
+#                  ncooccur=ncooccur,
+#                  n_germline=n_germline) %>%
+#           cbind(ch = event,
+#                 germline=term)
+#         logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+#     }
+# }
+# r = logistf_gene_var %>% filter(grepl("term",term))
+# saveRds(r,"Inputs/g_overall_ch.rds")
+
+r = readRDS("Inputs/g_overall_ch.rds")
+
+asterisks = r %>% 
+  dplyr::select(ch, p.stars,type) %>%
+  left_join(.,D %>% dplyr::select(ch,germline,prop_patient,type) %>%
+              group_by(ch) %>% 
+              summarise(prop=max(prop_patient)) %>%
+              distinct() %>%
+              ungroup(),
+            by = 'ch')
+
+p3 = ggplot(
+      D %>% mutate(ch=factor(ch, levels = ch_list)),
+      aes(x = ch, y = prop_patient, fill = germline)
+  ) +
+  geom_bar(stat = 'identity', position = "dodge", color = 'black', size = 0.25) +
+  facet_wrap(.~factor(type, levels=c("CH-heme", "mCA-auto"), labels = c("CH-heme", "mCA-auto")), ncol = 2, scales = "free") +
+  plot_theme +
+  theme(
+      legend.position = c(1, 1), 
+      legend.justification = c("right", "top"),
+      legend.key.size = unit(2, 'mm'),
+      axis.text.x = element_text(angle = 45, hjust = 1, face = "italic")
+  ) +
+  geom_text(inherit.aes = F,data=asterisks, mapping = aes(x = ch, y = 1.03*prop, label = p.stars),
+            size = 5/.pt, fontface = "bold") +
+  ylab("CH prevalence (%)") +
+  xlab('') +
+  scale_fill_manual(name = "Germline variant", labels = c("No", "Yes"), values = c("dark grey",colors[1]))
+
+# supplementary table
+t = r %>% 
+  dplyr::select(ch,type,p.value,p.stars) %>% group_by(ch) %>% mutate(p.value=max(p.value)) %>% ungroup() %>% distinct() %>%
+  left_join(.,D %>% dplyr::select(ch,germline,prop=prop_patient) %>%distinct(),by = 'ch') %>%
+  mutate(prevalence=round(prop,2)) %>%
+  dplyr::select(ch, type, germline, prevalence, p.value) %>% mutate(germline=ifelse(germline==1,"yes","no"))
+write_xlsx(t,"Tables/supp_fig1c.xlsx")
+
+######### panel
+
+panel = panel_theme(p2,"b") / panel_theme(p3,"c")
+savePdf(p=panel,w=80,h=115,o="1bc.pdf")
+
+```
+
+
+# Fig2: g->CH
+```{r}
+c = germline_c %>% dplyr::select(symbol,n=n_germline) %>% distinct()
+
+plot = readRDS("Inputs/logistic_combined2.rds") %>%
+  filter(analysis=="gene-overall") %>%
+  filter(p_fdr<0.05) %>%
+  mutate(gene=str_remove(germline,"g_")) %>%
+  left_join(.,c,by=c("gene"="symbol")) %>%
+  mutate(gene_label = paste0(gene," (n=",n,")")) %>%
+  arrange(factor(ch, levels = c("cnv_auto","ch_heme")),-estimate) %>%
+  mutate(gene_label = factor(gene_label, levels = rev(unique(gene_label)))) %>%
+  mutate(xpos=as.integer(as.factor(gene_label)))
+
+level=levels(plot$gene_label)
+g_ch = plot %>% filter(ch=="ch_heme") %>% pull(germline) %>% unique()
+g_mCA = plot %>% filter(ch=="cnv_auto") %>% pull(germline) %>% unique()
+
+plot_FE = data.frame(
+  gene_label = rep(plot$gene_label, each = 4),
+  ch = rep(plot$ch, each = 4),
+  xpos = rep(plot$xpos, each = 4),
+  estimate_FE = rep(plot$estimate_FE, each = 4),
+  conf.low_FE = rep(plot$conf.low_FE, each = 4),
+  conf.high_FE = rep(plot$conf.high_FE, each = 4)
+) %>% group_by(gene_label) %>%
+  mutate(n_bar=n_distinct(ch)) %>%
+  group_by(gene_label,ch) %>%
+  mutate(order=row_number()) %>%
+  ungroup() %>%
+  mutate(xpos=as.numeric(xpos),
+         x=case_when(
+           order==1|order==3~xpos,
+           order==2~xpos+0.15,
+           order==4~xpos-0.15
+         ),
+         y=case_when(
+          order==2|order==4~estimate_FE,
+          order==1~conf.low_FE,
+          order==3~conf.high_FE 
+         ),
+         x=ifelse(n_bar==2&ch=="ch_heme",x-0.25,x),
+         x=ifelse(n_bar==2&ch=="cnv_auto",x+0.25,x),
+         group=paste0(gene_label,"-",ch))
+  
+p1 = ggplot(plot, aes(x = gene_label, y = estimate, ymin = conf.low, ymax = conf.high, color = ch, fill = ch, label = q.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 6/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  coord_flip() +
+  geom_polygon(data=plot_FE, inherit.aes = F,aes(x=x,y=y,group=group),
+               color="black",alpha=0,size=0.5/.pt,show.legend = FALSE) +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(face = "italic"),
+    legend.position = c(1, 0.8), 
+    legend.background = element_blank(),
+    legend.justification = c("right", "top")
+  ) +
+  scale_fill_manual(name="CH category", breaks=c("ch_heme","cnv_auto"), labels=c("CH-heme","mCA-auto"),values = c(colors[1],colors[2])) +
+  scale_color_manual(name="CH category", breaks=c("ch_heme","cnv_auto"), labels=c("CH-heme","mCA-auto"),values = c(colors[1],colors[2])) +
+  xlab("Germline gene") +
+  ylab('Odds Ratio (95% CI) of CH') +   
+  scale_y_log10()
+
+savePdf(p1,w=75,h=80,o="Fig2a.pdf")
+
+########################################### CH-heme heatmap
+plot =  readRDS("Inputs/logistic_combined2.rds") %>%
+  filter(analysis=="gene-subtype") %>%
+  filter(grepl("c_",ch)) %>%
+  filter(germline%in%g_ch) %>%
+  mutate(rep=ifelse(estimate>1&estimate_FE>1,"directional",NA),
+         rep=ifelse(estimate<1&estimate_FE<1,"directional",rep),
+         rep=ifelse(p.value_FE<0.05,"significant",rep)) %>%
+  mutate(log_or = log(estimate),
+         log_or = ifelse(log_or>=3,3,log_or),
+         log_or = ifelse(log_or<=-3,-3,log_or),
+         germline=str_remove(germline,"g_"),
+         ch=str_remove(ch,"c_")
+         ) %>% 
+  left_join(.,ch_c%>%dplyr::select(symbol,CH_cat)%>%distinct(),by=c("ch"="symbol")) %>%
+  filter(CH_cat!="other_cancer") %>%
+  mutate(germline = factor(germline, levels = unique(germline[order(n_germline)])),
+         ch = factor(ch, levels = unique(ch[order(-n_ch)]))) %>%
+  mutate(P = case_when(
+    p.value >= 0.01 ~ 10,
+    p.value >= 0.001 ~ 30,
+    p.value >= 0.0 ~ 100,
+  ))
+
+pLabel <- c('<0.05', '<0.01', '<0.001')
+
+p2 = ggplot(plot,aes(x = ch, y = germline)) + 
+  geom_tile(fill = "white", colour = "lightgrey") +
+  geom_point(aes(color = log_or, size=P), show.legend = T) + 
+  scale_size_area(labels = pLabel, breaks = sort(unique(plot$P)), max_size = 3) +
+  scale_color_gradient2(
+    name = "logOR",
+    low = "darkblue",
+    mid = "white",
+    high = "darkred",
+    midpoint = 0,
+    na.value = "white",
+    limits = c(-3,3)) +
+  geom_text(aes(x = ch, y = as.numeric(factor(germline))+0.3, label=as.character(ncooccur)),
+            hjust=0.5, vjust=0.5, size = 5/.pt, inherit.aes = FALSE, fontface='bold', color="black") +
+  geom_tile(aes(size =ifelse(rep=="directional",1/.pt,NA)), color="black", linetype="dashed", fill = "white", alpha=0, width = 0.95, height = 0.95 ,show.legend = F) +
+  geom_tile(aes(size =ifelse(rep=="significant",1/.pt,NA)), color="black", fill = "white", alpha=0, width = 0.95, height = 0.95, show.legend = F) +
+  xlab('CH-heme gene') +
+  ylab('Germline gene') +
+  plot_theme +
+  theme(
+      legend.position = 'top',
+      legend.justification='left',
+      legend.key.size = unit(3, "mm"),
+      axis.text.x = element_text(angle = 45, hjust = 1, face="italic"),
+      axis.text.y = element_text(face="italic")
+  ) +
+  guides(color = guide_colorbar(title="log odds ratio",title.position = "top"),
+         size = guide_legend(title="P value", title.position = "top"))
+savePdf(p2,w=95,h=80,o="Fig2b.pdf")
+
+########################################### mCA-auto heatmap
+
+plot =  readRDS("Inputs/logistic_combined2.rds") %>%
+  filter(analysis=="gene-subtype") %>%
+  filter(grepl("c_",ch)==F) %>%
+  filter(germline%in%g_mCA) %>%
+  mutate(rep=ifelse(estimate>1&estimate_FE>1,"directional",NA),
+         rep=ifelse(estimate<1&estimate_FE<1,"directional",rep),
+         rep=ifelse(p.value_FE<0.05,"significant",rep)) %>%
+  mutate(log_or = log(estimate),
+         log_or = ifelse(log_or>=3,3,log_or),
+         log_or = ifelse(log_or<=-3,-3,log_or),
+         germline=str_remove(germline,"g_"),
+         germline = factor(germline, levels = unique(germline[order(n_germline)])),
+         ch_chr = gsub("\\D", "", ch),
+         ch_element=nchar(ch)
+         ) %>%
+ arrange(as.numeric(ch_chr),ch) %>%
+  mutate(ch=factor(ch,levels = unique(ch))) %>%
+  mutate(P = case_when(
+    p.value >= 0.01 ~ 10,
+    p.value >= 0.001 ~ 30,
+    p.value >= 0.0 ~ 100,
+  ))
+
+pLabel <- c('<0.05', '<0.01', '<0.001')
+
+p3 = ggplot(plot,aes(x = ch, y = germline)) + 
+  geom_tile(fill = "white", colour = "lightgrey") +
+  geom_point(aes(color = log_or, size=P), show.legend = TRUE) + 
+  #scale_size(range = c(min(D1$P), max(D1$P)), labels = c('>=0.2', '<0.2', '<0.1', '<0.05', '<0.01', '<0.001')) +
+  scale_size_area(labels = pLabel, breaks = sort(unique(plot$P)), max_size = 3) +
+  scale_color_gradient2(
+    name = "logOR",
+    low = "darkblue",
+    mid = "white",
+    high = "darkred",
+    midpoint = 0,
+    na.value = "white",
+    limits = c(-4,4)) +
+  geom_text(aes(x = ch, y = as.numeric(factor(germline))+0.35, label=as.character(ncooccur)),
+            hjust=0.5, vjust=0.5, size = 5/.pt, fontface='bold', inherit.aes = FALSE) + 
+  geom_tile(aes(size =ifelse(rep=="directional",1/.pt,NA)), color="black", linetype="dashed", fill = "white", alpha=0, width = 0.95, height = 0.95 ,show.legend = F) +
+  geom_tile(aes(size =ifelse(rep=="significant",1/.pt,NA)), color="black", fill = "white", alpha=0, width = 0.95, height = 0.95, show.legend = F) +
+  xlab('mCA-auto segment') +
+  ylab('Germline gene') +
+  plot_theme +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, face="italic"),
+    axis.text.y = element_text(face="italic")
+  )
+savePdf(p=p3,w=175,h=50,o="Fig2c.pdf")
+
+```
+
+# Fig3: g->Heme
+```{r}
+plot = readRDS("Inputs/g_heme.rds") %>%
+  filter(term=="get(term)") %>%
+  mutate(germline=str_remove(exposure,"g_")) %>%
+  left_join(.,germline_c%>%dplyr::select(symbol,inh,heme_gene,n_germline)%>%unique(),by=c("germline"="symbol")) %>%
+  filter(germline%in%germline[p.value<0.05]) %>%
+  mutate(gene_label = paste0(germline," (n=",n_germline,")")) %>%
+  arrange(-estimate) %>%
+  mutate(gene_label = factor(gene_label, levels = unique(gene_label))) %>%
+  mutate(evidence = ifelse(heme_gene==1&inh=="Dominant","Known","Novel"),
+         evidence = factor(evidence,levels = c("Known","Novel")))
+
+
+# novel genes
+plot %>% filter(p.value<0.05) %>% filter(evidence=="Novel") %>% dplyr::select(outcome,germline,inh) %>% arrange(outcome) %>% as.matrix() 
+
+sig_heme = unique(plot$germline)
+sig_Lymphoid = plot %>% filter(outcome=="Lymphoid"&p.value<0.05) %>% pull(germline) %>% unique()
+sig_Myeloid = plot %>% filter(outcome=="Myeloid"&p.value<0.05) %>% pull(germline) %>% unique()
+
+p <- plot %>%
+  ggplot(aes(x = gene_label, y = estimate, ymin = conf.low, ymax = conf.high, color = outcome, fill = outcome, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.6), size = 6/.pt, alpha = .9, angle=90, hjust=0.5,vjust=0,show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.6), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.6), size=1, show.legend = TRUE) +
+  scale_y_log10() +
+  plot_theme +
+  theme(
+    axis.text.y = element_text(angle = 0),
+    axis.text.x = element_text(face = "italic",angle = 60, vjust = 1, hjust = 1),
+    legend.position = c(1, 1), 
+    legend.justification = c("right", "top"),
+    plot.margin =  unit(c(3,3,0,0), 'mm'),
+    legend.key.size = unit(5,"mm")
+  ) +
+  scale_fill_manual(name="Malignancy type", breaks=c("Myeloid","Lymphoid"), labels=c("Myeloid","Lymphoid"),values = c(colors[1],colors[2])) +
+  scale_color_manual(name="Malignancy type", breaks=c("Myeloid","Lymphoid"), labels=c("Myeloid","Lymphoid"),values = c(colors[1],colors[2])) +
+  xlab("Germline gene") +
+ ylab('Hazard Ratio (95% CI) of Hematologic Malignancies')
+
+savePdf(p,w=120,h=80,o="Fig3.pdf")
+
+```
+
+# Fig4: g+CH->Heme
+```{r}
+plot = readRDS("Inputs/gCH_heme.rds") %>%
+  filter(cancer=="Myeloid") %>%
+  mutate(germline=str_remove(germline,"g_")) %>%
+  filter(germline%in%sig_Myeloid) %>%
+  mutate(estimate=ifelse(case==0,0,estimate),
+         conf.low=ifelse(case==0,0,conf.low),
+         conf.high=ifelse(case==0,0,conf.high)) %>%
+  mutate(term=str_remove(term,"Mutation"),
+         germline=factor(germline,levels = sig_Myeloid),
+         xpos=as.integer(as.factor(germline)),
+         p=p.value.logistf,
+         pHet=stars.pval(p),
+         pHet=ifelse(p<0.1&p>=0.05,"*",pHet))
+
+plot_het = data.frame(
+  term=plot$term,
+  germline = plot$germline,
+  cancer = plot$cancer,
+  case=plot$case,
+  control=plot$control,
+  xpos = plot$xpos,
+  p=plot$p,
+  pHet=plot$pHet
+) %>%
+  mutate(xpos=as.numeric(xpos),
+         xmin=xpos-0.2,
+         xmax=xpos+0.2,
+         x_table=ifelse(term=="Germline only",xmin,xmax)) %>%
+  mutate(xmin=ifelse(p<0.1,xmin,NA),
+         xmax=ifelse(p<0.1,xmax,NA),
+         pHet=ifelse(p<0.1,pHet,NA)) %>%
+  distinct()
+
+t <- plot_het %>%
+  ggplot(aes(x = germline)) +
+  geom_blank() +
+  geom_text(aes(x=x_table,y="No HMs",label=control), hjust = 0.5, size = 5/.pt, angle=30) +
+  geom_text(aes(x=x_table,y="HMs",label=case), hjust = 0.5, size = 5/.pt, angle=30) +
+  theme_void() +
+  theme(
+    axis.text.y = element_text(size=font_size),
+    plot.margin = margin(t = 3, r = 3, b = 0, l = 0, unit = "mm")
+  )
+
+p <- plot %>%
+  ggplot(aes(x = germline, y = estimate, ymin = conf.low, ymax = conf.high, color = term, fill = term, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_errorbar(position = position_dodge(width = 0.6), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.6), size=1, show.legend = TRUE) +
+  geom_bracket(inherit.aes = F,
+      data = plot_het,
+      aes(label = pHet,
+          xmin=xmin,xmax=xmax),
+      y.position=log10(max(plot$conf.high))+0.15, #hjust = 0, coord.flip = T,angle=0,
+      label.size = 5/.pt,
+      size = 1/.pt
+    ) +
+  scale_y_log10() +
+  plot_theme +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 30, vjust = 0.5),
+    legend.position = c(0.15, 0.2),
+    legend.background = element_blank(),
+    legend.key.size = unit(5,"mm"),
+    plot.title = element_text(size = 7,hjust = 0.5,vjust = 0.5),
+    plot.margin =  unit(c(0,3,0,0), 'mm')
+  )  +
+  scale_fill_manual(name="Mutation", breaks=c("Germline only","Germline+CH"), labels=c("Germline only","Germline + any CH"),values = c("black",colors[1])) +
+  scale_color_manual(name="Mutation", breaks=c("Germline only","Germline+CH"), labels=c("Germline only","Germline + any CH"),values = c("black",colors[1])) +
+ ylab('Hazard Ratio of Hematologic Malignancies (HMs)') +
+  ggtitle("Myeloid Malignancies")
+
+p1=(p/t) + plot_layout(heights = c(5,0.8))
+
+################
+plot = readRDS("Inputs/gCH_heme.rds") %>%
+  filter(cancer=="Lymphoid") %>%
+  mutate(germline=str_remove(germline,"g_")) %>%
+  filter(germline%in%sig_Lymphoid) %>%
+  mutate(estimate=ifelse(case==0,0,estimate),
+         conf.low=ifelse(case==0,0,conf.low),
+         conf.high=ifelse(case==0,0,conf.high)) %>%
+  mutate(term=str_remove(term,"Mutation"),
+         germline=factor(germline,levels = sig_Lymphoid),
+         xpos=as.integer(as.factor(germline)),
+         p=p.value.logistf,
+         pHet=stars.pval(p),
+         pHet=ifelse(p<0.1&p>=0.05,"*",pHet))
+
+plot_het = data.frame(
+  term=plot$term,
+  germline = plot$germline,
+  cancer = plot$cancer,
+  case=plot$case,
+  control=plot$control,
+  xpos = plot$xpos,
+  p=plot$p,
+  pHet=plot$pHet
+) %>%
+  mutate(xpos=as.numeric(xpos),
+         xmin=xpos-0.2,
+         xmax=xpos+0.2,
+         x_table=ifelse(term=="Germline only",xmin,xmax)) %>%
+  mutate(xmin=ifelse(p<0.1,xmin,NA),
+         xmax=ifelse(p<0.1,xmax,NA),
+         pHet=ifelse(p<0.1,pHet,NA)) %>%
+  distinct()
+
+t <- plot_het %>%
+  ggplot(aes(x = germline)) +
+  geom_blank() +
+  geom_text(aes(x=x_table,y="No HMs",label=control), hjust = 0.5, size = 5/.pt, angle=30) +
+  geom_text(aes(x=x_table,y="HMs",label=case), hjust = 0.5, size = 5/.pt, angle=30) +
+  theme_void() +
+  theme(
+    axis.text.y = element_text(size=font_size),
+    plot.margin = margin(t = 3, r = 3, b = 0, l = 0, unit = "mm")
+  )
+
+p <- plot %>%
+  ggplot(aes(x = germline, y = estimate, ymin = conf.low, ymax = conf.high, color = term, fill = term, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_errorbar(position = position_dodge(width = 0.6), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.6), size=1, show.legend = TRUE) +
+  geom_bracket(inherit.aes = F,
+      data = plot_het,
+      aes(label = pHet,
+          xmin=xmin,xmax=xmax),
+      y.position=log10(max(plot$conf.high))+0.15, #hjust = 0, coord.flip = T,angle=0,
+      label.size = 5/.pt,
+      size = 1/.pt
+    ) +
+  scale_y_log10() +
+  plot_theme +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 30, vjust = 0.5),
+    legend.position = "none", 
+    legend.background = element_blank(),
+    plot.title = element_text(size = 7,hjust = 0.5,vjust = 0.5),
+    plot.margin =  unit(c(0,3,0,0), 'mm'),
+    legend.key.size = unit(5,"mm")
+  )  +
+  scale_fill_manual(name="Mutation", breaks=c("Germline only","Germline+CH"), labels=c("Germline only","Germline + any CH"),values = c("black",colors[1])) +
+  scale_color_manual(name="Mutation", breaks=c("Germline only","Germline+CH"), labels=c("Germline only","Germline + any CH"),values = c("black",colors[1])) +
+  ylab('Hazard Ratio (95% CI) of Hematologic Malignancies (HMs)') +
+  ggtitle("Lymphoid Malignancies")
+
+p2=(p/t) + plot_layout(heights = c(5,0.8))
+
+a = (p1 & theme(legend.position = c(0.11,0.15)) | p2 & ylab("")) + plot_layout(ncol = 2, widths = c(13,6))
+
+savePdf(p=a,w=180,h=80,o="Fig4a.pdf")
+ 
+### supplementary table
+t = readRDS("Inputs/gCH_heme.rds") %>% 
+  left_join(.,readRDS("Inputs/gCH_heme_count.rds") %>% filter(mutation=="MutationNone") %>%
+              dplyr::rename(control_no_mutation=control,case_no_mutation=case), 
+            by=c("cancer","germline")) %>%
+  mutate(germline=str_remove(germline,"g_")) %>%
+  filter(germline%in%c(sig_Myeloid,sig_Lymphoid)) %>%
+  mutate(estimate=ifelse(case==0,0,estimate),
+         conf.low=ifelse(case==0,0,conf.low),
+         conf.high=ifelse(case==0,0,conf.high)) %>%
+  mutate(mutation=str_remove(term,"Mutation"),
+         pHet=p.value.logistf) %>%
+  dplyr::select(germline,mutation,cancer,HR=estimate,conf.low,conf.high,p.value,case_with_mutation=case,case_no_mutation,control_with_mutation=control,control_no_mutation,pHet)
+write_xlsx(t,"Tables/supp_fig4a.xlsx")
+
+####################################################################### Absolute risk
+risk = fread("Inputs/absolute_risk.txt") %>%
+  filter((Population=="Non-carriers"&gene!="g_CHEK2")==F) %>%
+  group_by(Population) %>%
+  mutate(Population = factor(Population, levels = c("Non-carriers","CHEK2 carriers","ATM carriers")))
+
+cut_off = 0.05
+# % of individuals with ≥5% absolute risk
+(risk %>% filter(Population=="Non-carriers") %>% filter(risk>=cut_off) %>% nrow())/nrow(risk%>% filter(Population=="Non-carriers")) 
+(risk %>% filter(Population=="CHEK2 carriers") %>% filter(risk>=cut_off) %>% nrow())/nrow(risk%>% filter(Population=="CHEK2 carriers"))  
+(risk %>% filter(Population=="ATM carriers") %>% filter(risk>=cut_off) %>% nrow())/nrow(risk%>% filter(Population=="ATM carriers")) 
+
+# No. of people need to be screened to identify an individual with ≥5% absolute risk
+nrow(risk%>% filter(Population=="Non-carriers"))/(risk %>% filter(Population=="Non-carriers") %>% filter(risk>=cut_off) %>% nrow()) 
+nrow(risk%>% filter(Population=="CHEK2 carriers"))/(risk %>% filter(Population=="CHEK2 carriers") %>% filter(risk>=cut_off) %>% nrow()) 
+nrow(risk%>% filter(Population=="ATM carriers"))/(risk %>% filter(Population=="ATM carriers") %>% filter(risk>=cut_off) %>% nrow()) 
+
+### 4b
+p1 = ggplot(risk,aes(x = risk*100, fill = Population)) +
+  geom_density(alpha = 0.5, size = 1/.pt) +
+  plot_theme +
+  theme(plot.margin = unit(c(2,0,0,0), 'mm'),
+        legend.position = c(0.1,0.75),
+        legend.background = element_blank()) +
+  scale_y_sqrt() +
+  scale_x_continuous(trans = "log10", breaks = c(0,0.01,0.1,1,10,100), labels = c(0,0.01,0.1,1,10,100))  +
+  scale_fill_manual(labels = c("No germline variant","CHEK2 germline variant","ATM germline variant"), values = c("dark grey",colors[1],colors[2])) +
+  ylab('Frequency Density') +
+  xlab(paste0("Absolute risk of myeloid malignancies for UKBB participants aged 50-74 (%)")) 
+
+### 4c
+plot = risk %>%
+  group_by(Population) %>%
+  mutate(Percentile = ntile(risk, 200)/2)
+
+# top 0.5% percentile risk
+plot%>%filter(Percentile==100) %>% group_by(Population) %>% summarise(m=median(risk)) %>% as.matrix()
+
+# No. of people at top 1% percentile risk
+plot %>% filter(Percentile>=99.5) %>% pull(Population) %>% table()
+
+p2 <- ggplot(plot %>% filter(Percentile>=99.5),
+    aes(x =as.factor(Percentile),
+        y = risk*100,
+        fill = Population
+    )
+) +
+#scale_y_continuous(position = "left", limits = c(0,0.2)) +
+geom_boxplot(
+    position = 'dodge',
+    outlier.alpha = 0, 
+    alpha = 0.5,
+    width=0.75,
+    fatten=1,
+    size = 1/.pt
+) +
+scale_y_continuous(trans = "sqrt",
+                   breaks = c(0,1,2,4,10,20,30,40,60)) +
+scale_fill_manual(labels = c("No germline variant","CHEK2 germline variant","ATM germline variant"), values = c("dark grey",colors[1],colors[2])) +
+plot_theme +
+theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.y = element_line(linetype = 'dashed'),
+    legend.position = "none"
+) +
+xlab("Absolute risk percentile") +
+ylab('25-year Absolute Risk')
+
+savePdf(p=p1&theme(legend.position = "top",legend.justification = "left", legend.direction = "vertical"),w=180,h=60,o="Fig4b.pdf")
+savePdf(p=p2,w=70,h=35,o="Fig4c.pdf")
+
+```
+
+# Fig5: High risk CH
+```{r}
+
+####################################### forest
+r = fread("Inputs/g_selectedCH.txt") 
+
+plot = r %>% filter(germline=="germline") %>%
+  mutate(term=str_replace(term,"mutation",""),
+         cancer=factor(cancer,levels = c("Myeloid","Lymphoid"),
+                       labels = c("Myeloid Malignancies","Lymphoid Malignancies")),
+         term=factor(term,levels = c("ch_other","ch_high")))
+
+p1= ggplot(plot, 
+           aes(x = "Germline\ncarriers", y = estimate, ymin = conf.low, ymax = conf.high, color = term, fill = term, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 5/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  coord_flip() +
+  facet_grid(cols = vars(cancer)) +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    legend.position = "top",
+    legend.margin=margin(0, 0, 0, -10)
+  ) +
+  scale_fill_manual(name="", breaks=c("ch_high","ch_other"), labels=c("Germline selected CH","Germline non-selected CH"),values = c(colors[1],colors[2])) +
+  scale_color_manual(name="", breaks=c("ch_high","ch_other"), labels=c("Germline selected CH","Germline non-selected CH"),values = c(colors[1],colors[2])) +
+  xlab("") +
+  ylab('Hazard Ratio (95% CI)') +   
+  scale_y_log10()
+
+savePdf(p=p1,w=89,h=30,o="Fig5b.pdf")
+
+plot = r %>% filter(germline!="germline") %>% arrange(-nevent) %>% mutate(gene=factor(gene,unique(gene)))
+
+p2= ggplot(plot %>% filter(cancer=="Myeloid"), aes(x = gene, y = estimate, ymin = conf.low, ymax = conf.high, color = term, fill = term, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 5/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  coord_flip() +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(face = "italic"),
+    legend.position = "none",
+    plot.margin = unit(c(0,2,0,0), 'mm')
+  ) +
+  scale_fill_manual(name="", breaks=c("ch_high","ch_other"), labels=c("Germline selected CH","Germline non-selected CH"),values = c(colors[1],colors[2])) +
+  scale_color_manual(name="", breaks=c("ch_high","ch_other"), labels=c("Germline selected CH","Germline non-selected CH"),values = c(colors[1],colors[2])) +
+  xlab("") +
+  ylab('Hazard Ratio (95% CI) \nof Myeloid Malignancies') +   
+  scale_y_log10() 
+savePdf(p=p2,w=40,h=25,o="Fig5c.pdf")
+
+p3= ggplot(plot %>% filter(cancer=="Lymphoid") , aes(x = gene, y = estimate, ymin = conf.low, ymax = conf.high, color = term, fill = term, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 5/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  coord_flip() +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(face = "italic"),
+    legend.position = "none"
+  ) +
+  scale_fill_manual(name="", breaks=c("ch_high","ch_other"), labels=c("Germline associated CH","Other CH"),values = c(colors[1],colors[2])) +
+  scale_color_manual(name="", breaks=c("ch_high","ch_other"), labels=c("Germline associated CH","Other CH"),values = c(colors[1],colors[2])) +
+  xlab("") +
+  ylab('Hazard Ratio (95% CI) \nof Lymphoid Malignancies') +   
+  scale_y_log10() 
+
+savePdf(p=p3,w=40,h=25,o="Fig5d.pdf")
+
+### supplementary table
+
+t = fread("Inputs/g_selectedCH.txt") %>%
+  left_join(., fread("Inputs/g_selectedCH_count.txt") %>% filter(mutation=="mutationNone") %>%
+              dplyr::rename(control_no_mutation=control,case_no_mutation=case),by=c("cancer","germline")) %>%
+  dplyr::select(germline,mutation=term,cancer,HR=estimate,std.error,conf.low,conf.high,p.value,case_with_mutation=case,case_no_mutation,control_with_mutation=control,control_no_mutation) %>%
+  mutate(germline=str_remove(germline,"g_"),
+         mutation=str_remove(mutation,"mutation"))
+write_xlsx(t,"Tables/supp_fig5.xlsx")
+
+################################## survival curve CHEK2 + DNMT3A
+D = M_wide %>% filter(multi_gene==0) %>%
+  dplyr::select("eid","g_CHEK2","c_DNMT3A","Myeloid","survtime_Myeloid",any_of(MV)) %>%
+  mutate(Mutation = case_when(
+           g_CHEK2==1&c_DNMT3A==1 ~ "Germline+CH",
+           g_CHEK2==0&c_DNMT3A==1 ~ "CH only",
+          )) %>%
+  mutate(Mutation=factor(Mutation,levels = c("CH only",
+                                             "Germline+CH"))) %>%
+  filter(is.na(Mutation)==F)
+
+pHet = coxph(formula = as.formula(paste0("Surv(survtime_Myeloid, Myeloid) ~",paste(MV, collapse = "+"), "+ g_CHEK2")),
+                     data= D%>%filter(c_DNMT3A==1), na.action=na.omit) %>% 
+  sjPlot::get_model_data(type="est") %>%
+  filter(term=="g_CHEK2") %>% pull(p.value) %>% scales::pvalue(.,accuracy = 0.001,decimal.mark = ".",add_p = TRUE)
+
+fit = survfit(Surv(survtime_Myeloid/365, Myeloid) ~ Mutation, data = D, conf.type = "log-log")
+p = ggsurvplot(fit, data = D, 
+               size = 0.5/.pt,
+               censor.size = 5/.pt,
+               palette = c("black", "#BC3C29FF"),
+               pval = F, 
+               #pval.coord = c(0,0.965),
+               #pval.size = 2,
+               #palette = "jco",
+               break.time.by=2,
+               risk.table = T,
+               risk.table.col = "strata",
+               fontsize = 5/.pt,
+               font.main = 5,
+               font.tickslab = 5,
+               xlim = c(0,10),
+               xlab = "Years",
+               ylab = "Propotion without \nMyeloid Malignancies",
+               legend.title = "Mutation",
+               legend.labs = c("CHEK2-","CHEK2+")
+               )
+surv = p$plot + 
+  scale_y_continuous(limits = c(0.96, 1),
+                     breaks = c(0.96, 0.97, 0.98, 0.99, 1),
+                     labels = scales::percent(c(0, 0.97, 0.98, 0.99, 1))) +
+  coord_cartesian(clip = "off") +
+  annotation_custom(grid::linesGrob(),
+                    xmin = -0.5, xmax = -0.5, ymin = 0.958, ymax = 1) +
+  annotation_custom(grid::rectGrob(gp = grid::gpar(fill = "white", col = NA)),
+                    xmin = -1, xmax = 0, ymin = 0.9635, ymax = 0.9665) +
+  annotation_custom(grid::linesGrob(),
+                    xmin = -0.7, xmax = -0.3, ymin = 0.962, ymax = 0.965) +
+  annotation_custom(grid::linesGrob(),
+                    xmin = -0.7, xmax = -0.3, ymin = 0.965, ymax = 0.968) +
+  plot_theme +
+  theme(axis.line.y = element_blank()) +
+  scale_x_continuous(limits = c(0,10.1),breaks = seq(0,10,by=2)) + 
+  ggtitle("DNMT3A CH progression") +
+  theme(
+    legend.position = c(0.1, 0),
+    legend.background = element_blank(),
+    legend.justification = c("left", "bottom"),
+    legend.key.size = unit(3,"mm")) +
+  annotate("text", x = 10, y = 0.99, label = pHet, size = 6/.pt)
+
+t = p$table +
+  theme_survminer(
+    font.tickslab = c(6, "italic", "black"),
+    legend = "none"
+        ) +
+  theme_cleantable() +
+  scale_x_continuous(limits = c(0,10),breaks = seq(0,10,by=2)) + 
+  theme(plot.title = element_text(size=6,hjust = 0.5,vjust = -2)) 
+
+panel = surv + t + plot_layout(nrow = 2, heights = c(5,1))
+savePdf(p=panel,w=80,h=50,o="Fig5e.pdf")
+
+```
+
+# Extended Figures
+## Efig1a: CH cat
+```{r}
+D = M_wide %>%
+  mutate(germ_cat = case_when(
+    Dominant==1~"Dominant",
+    Recessive==1~"Recessive",
+    TRUE~"None"
+    ))
+
+table(D$germ_cat)
+
+######## SNV/INDEL
+ch_subset = c("ch_both", "ch_myeloid", "ch_lymphoid", "ch_other_cancer")
+t_var = list()
+for (ch in ch_subset) {
+t = D %>% dplyr::select("eid", "age_cat", any_of(ch)) %>%
+  group_by(age_cat) %>%
+  summarise(total = n(),
+            CH = sum(get(ch))) %>%
+  mutate(freq = CH/total) %>%
+  cbind(subset=ch) %>%
+  ungroup()
+  
+t_var = rbind(t_var,t)
+}
+
+t_ch = t_var %>% 
+  rowwise() %>% 
+  mutate(lower = prop.test(CH, total, conf.level = .95)$conf.int[1], 
+         upper = prop.test(CH, total, conf.level = .95)$conf.int[2]) %>% 
+  mutate(subset=factor(subset,levels = c("ch_both", "ch_myeloid", "ch_lymphoid", "ch_other_cancer"), 
+                       labels = c("CH-both myeloid and lymphoid", "CH-myeloid only", "CH-lymphoid only", "CH-solid")),
+         type="SNV/INDEL") %>%
+  ungroup()
+
+p1 = ggplot(
+    t_ch,
+    aes(x = age_cat,
+        y = freq*100,
+        color = subset,
+        fill = subset,
+        group = subset
+        )
+) +
+    geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = T, level= 0.95, alpha = 0.5, linewidth=1/.pt) +
+    xlab("Age") +
+    ylab("Proportion of patients with CH (%)") +
+    plot_theme +
+    theme(axis.text.x = element_text(angle = 45,vjust=1,hjust=1),
+        legend.position = c(0.05,1),
+        legend.background = element_blank(),
+        legend.key.size = unit(3,"mm"),
+        legend.justification = c(0.05,1)) +
+  scale_y_continuous(limits = c(0,9),breaks = c(3,6,9)) +
+  scale_fill_manual(name="CH category",values = colors[1:4]) +
+  scale_color_manual(name="CH category",values = colors[1:4])
+
+######## CNV
+ch_subset = c("cnv_auto", "chr23", "chr24")
+t_var = list()
+for (ch in ch_subset) {
+t = D %>% filter(is.na(ch_cnv)==F) %>%
+  dplyr::select("eid", "age_cat", any_of(ch)) %>%
+  group_by(age_cat) %>%
+  summarise(total = n(),
+            CH = sum(get(ch))) %>%
+  mutate(freq = CH/total) %>%
+  cbind(subset=ch) %>%
+  ungroup()
+  
+t_var = rbind(t_var,t)
+}
+
+t_ch = t_var %>% 
+  rowwise() %>% 
+  mutate(lower = prop.test(CH, total, conf.level = .95)$conf.int[1], 
+         upper = prop.test(CH, total, conf.level = .95)$conf.int[2]) %>% 
+  mutate(subset=factor(subset,levels = c("cnv_auto", "chr23", "chr24"), 
+                       labels = c("mCA-auto", "LOX", "LOY")),
+         type="mCA") %>%
+  ungroup()
+
+p2 = ggplot(
+    t_ch,
+    aes(x = age_cat,
+        y = freq*100,
+        color = subset,
+        fill = subset,
+        group = subset
+        )
+) +
+    geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = T, level= 0.95, alpha = 0.5, linewidth=1/.pt) +
+    xlab("Age") +
+    ylab("Proportion of patients with CH (%)") +
+    plot_theme +
+    theme(axis.text.x = element_text(angle = 45,vjust=1,hjust=1),
+        legend.position = c(0.05,1),
+        legend.background = element_blank(),
+        legend.key.size = unit(3,"mm"),
+        legend.justification = c(0.05,1)) +
+  scale_y_continuous(limits = c(0,20)) +
+  scale_fill_manual(name="CH category",values = colors[5:7]) +
+  scale_color_manual(name="CH category",values = colors[5:7])
+
+a = p1 | p2 & theme(axis.title.y = element_blank())
+
+savePdf(p=a,w=90,h=50,o="E1a.pdf")
+
+```
+
+##Efig1b: g->CH cat
+```{r}
+# recalculate % using complete dataset
+ch_subset = c("ch_heme","ch_both","ch_myeloid","ch_lymphoid","ch_other_cancer",
+              "cnv_auto","cnv_auto_Loss","cnv_auto_CNLOH","cnv_auto_Gain","chr23_Loss","chr24_Loss")
+ch_labels = c("CH-heme","CH-both myeloid \nand lymphoid","CH-myeloid only","CH-lymphoid only","CH-solid","mCA-auto","mCA-auto-loss","mCA-auto-LOH","mCA-auto-gain","LOX","LOY")
+
+plot = readRDS("Inputs/g_ch_ukb_c.rds") %>% filter(analysis=="overall") %>%
+  mutate(prop=round(n_ch/total*100,2)) %>%
+  mutate(ch = factor(ch, levels = rev(ch_subset), labels = rev(ch_labels)),
+         ch_label=paste0(ch," (",prop,"%)"),
+         ch_label=factor(ch_label,levels = unique(ch_label[order(ch)])),
+         germline = factor(germline, levels = c("Dominant","Recessive")))
+
+t = plot %>% dplyr::select(germline,n_germline,ch,n_ch,ch_prevalence=prop,ncooccur,total,OR=estimate,std.error,conf.low,conf.high,p.value,p_fdr)
+write_xlsx(t,"Tables/supp_Efig1b.xlsx")
+
+p3 = ggplot(plot, aes(x = ch_label, y = estimate, ymin = conf.low, ymax = conf.high, color = germline, fill = germline, label = q.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 5/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  coord_flip() +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1),
+    legend.position = "top", 
+    legend.justification = "left",
+    legend.margin = margin(b=-1, l=-10, unit = "mm")
+  ) +
+  scale_fill_manual(name="Germline carrier status", breaks=c("Dominant","Recessive"),values = c(colors[1],colors[2])) +
+  scale_color_manual(name="Germline carrier status", breaks=c("Dominant","Recessive"), values = c(colors[1],colors[2])) +
+  xlab("") +
+  ylab('Odds Ratio (95% CI)') +
+  scale_y_continuous(trans = "log")
+
+b = p3
+savePdf(b,w=75,h=100,o="E1b.pdf")
+```
+
+##Efig1c: g->CH VAF/# 
+```{r}
+D = M_wide %>%
+  mutate(
+    num_bin_heme = case_when(
+      mutnum_heme==0~"0",
+      mutnum_heme==1~"1",
+      mutnum_heme==2~"2",
+      mutnum_heme>=3~"3+"
+         ),
+    num_bin_auto = case_when(
+      count_auto==0~"0",
+      count_auto==1~"1",
+      count_auto==2~"2",
+      count_auto>=3~"3+")
+    ) %>%
+  distinct() %>%
+  filter((germline==1&Dominant==0)==F)
+
+## CH 
+plot = bind_rows(
+  D %>% count(num_bin_heme,germline) %>%
+  group_by(germline) %>%
+  mutate(total=sum(n),
+         prop=n/total*100) %>% 
+  filter(num_bin_heme>0) %>% 
+  dplyr::rename(num_bin=num_bin_heme) %>%
+  mutate(ch="ch_heme"),
+  D %>% count(num_bin_auto,germline) %>%
+    group_by(germline) %>%
+    mutate(total=sum(n),
+           prop=n/total*100) %>% 
+    filter(num_bin_auto>0) %>% 
+    dplyr::rename(num_bin=num_bin_auto) %>%
+    mutate(ch="cnv_auto")
+) %>%
+  mutate(germline=factor(germline,levels = c(0,1)))
+
+pval = readRDS("Inputs/g_ch_numvaf_logistf.rds") %>%
+  filter(germline=="Dominant") %>%
+  mutate(num_bin=str_replace_all(ch,c("mutnum_heme_"="","mutnum_auto_"="")),
+         ch = ifelse(grepl("mutnum_heme_",ch),"ch_heme","cnv_auto")) %>%
+  dplyr::select(num_bin,ch,p.stars,p.value) %>%
+  right_join(.,plot%>%dplyr::select(num_bin,ch,prop) %>% 
+              group_by(num_bin,ch)%>% summarise(ypos=max(prop)),
+            by=c("num_bin","ch")) %>% 
+  mutate(p=format_p_value(p.value))
+
+p4 <- ggplot(plot) + 
+  geom_col(aes(x=num_bin, y=prop,fill=as.factor(germline)), color="black", linewidth=0.5/.pt,
+           position = position_dodge2(width = 0.3, preserve = "single")
+           ) +
+   geom_text(inherit.aes = F,data=pval, mapping = aes(x = num_bin, y = ypos+0.3, label = p),
+            size = 6/.pt) +
+  facet_wrap(.~factor(ch, levels=c("ch_heme", "cnv_auto"), labels = c("CH-heme", "mCA-auto")), ncol = 2) +
+  plot_theme +
+  theme(
+      axis.text.x = element_text(angle = 0, hjust=0.5),
+      legend.position = c(0.8,0.9),
+      legend.key.size = unit(3,"mm"),
+      legend.background = element_blank(),
+       plot.margin = unit(c(1,1,0,0),"mm")
+  ) +
+    xlab('Number of CH') +
+    ylab('Propotion of CH carriers (%)') +
+  scale_fill_manual(name = "", labels = c("No germline variant", "Dominant germline variant"), values = c("dark grey",colors[1]))
+
+## VAF
+plot = M_wide %>%
+  filter((germline==1&Dominant==0)==F) %>%
+  dplyr::select(eid,germline,VAF_heme,CF_auto) %>%
+  mutate(germline=factor(germline,levels = c(0,1), labels = c("No germline\nvariant","Dominant germline\nvariant")))
+
+pval=readRDS("Inputs/g_ch_numvaf_lm.rds") %>% filter(grepl("term",term)) %>%
+  filter(germline=="Dominant"&ch=="logVAF_heme")
+  
+p5 = plot %>% filter(VAF_heme>0) %>% mutate(ch="CH-heme") %>%
+ggplot(
+      aes(x = germline, y = VAF_heme, fill = germline)) + 
+  geom_boxplot(outlier.alpha = 0, color = 'black', linewidth=1/.pt, fatten=1) +
+  annotate("text", x = 1.5, y = 0.8, label = format_p_value(pval$p.value), vjust = -1, size=6/.pt) +
+  facet_grid(cols = vars(ch)) +
+  xlab("") +
+  ylab('Max VAF') +
+  plot_theme +
+  theme(legend.position = "none",
+        #axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1),
+        axis.text.x = element_blank(),
+        plot.margin = unit(c(1,1.2,0,0),"mm")) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("dark grey",colors[1]))
+
+c = ggarrange(p4, p5, widths = c(2,1))
+
+savePdf(p=c,w=90,h=50,o="E1c.pdf")
+
+```
+
+## Efig2a: gene->CH VAF/#
+```{r}
+plot = readRDS("Inputs/g_ch_numvaf_lm.rds") %>% filter(grepl("term",term)) %>%
+  filter(germline%in%unique(c(g_ch))) %>%
+  filter(ch%in%c("logVAF_heme","mutnum_heme")) %>%
+  mutate(sig=ifelse(p.value<0.05,1,0),
+         germline=str_remove(germline,"g_"),
+         germline=factor(germline,levels = unique(germline[order(-freq)])),
+         ch=factor(ch,levels = c("logVAF_heme","mutnum_heme"),
+                   labels = c("CH-heme logVAF","CH-heme count")),
+         estimate2=case_when(
+           estimate>0.5 ~ 0.5,
+           estimate< -0.5 ~-0.5,
+           TRUE ~ estimate
+         ))
+
+p1 = plot %>%
+  ggplot(aes(x = germline, y = ch, fill = estimate2)) +
+    geom_tile(color = "black") +
+    scale_fill_gradient2(
+        low = "darkblue",
+        mid = "white",
+        high = "darkred", 
+        midpoint = 0, 
+        na.value = "white",
+        limits = c(-0.5,0.5),
+        breaks=c(-0.5,-0.25,0,0.25,0.5),
+        labels=c("≤-0.5","-0.25","0","0.25","≥0.5"),
+        name = "Coefficient" 
+    ) +
+    geom_point(
+        aes(size = ifelse(sig==1, 1, NA)),
+        shape = 8, 
+        colour = "black",
+        show.legend = F
+    ) +
+    scale_size_area(max_size = 2) +
+    xlab('Germline gene that increases CH-heme risk') +
+    ylab('') +
+    plot_theme +
+    scale_y_discrete(expand = c(0,0)) +
+    scale_x_discrete(expand = c(0,0)) +
+    theme(
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_blank(),
+        legend.position = 'top',
+        axis.text.x = element_text(face = "italic", angle = 30, hjust = 1),
+    )
+
+plot = readRDS("Inputs/g_ch_numvaf_lm.rds") %>% filter(grepl("term",term)) %>%
+  filter(germline%in%unique(c(g_mCA))) %>%
+  filter(ch%in%c("count_auto")) %>%
+  mutate(sig=ifelse(p.value<0.05,1,0),
+         germline=str_remove(germline,"g_"),
+         germline=factor(germline,levels = unique(germline[order(-freq)])),
+         ch=factor(ch,levels = c("count_auto"),
+                   labels = c("mCA-auto count")),
+         estimate2=case_when(
+           estimate>0.5 ~ 0.5,
+           estimate< -0.5 ~-0.5,
+           TRUE ~ estimate
+         ))
+
+p2 = plot %>%
+  ggplot(aes(x = germline, y = ch, fill = estimate2)) +
+    geom_tile(color = "black") +
+    scale_fill_gradient2(
+        low = "darkblue",
+        mid = "white",
+        high = "darkred", 
+        midpoint = 0, 
+        na.value = "white",
+        limits = c(-0.5,0.5),
+        breaks=c(-0.5,-0.25,0,0.25,0.5),
+        labels=c("≤-0.5","-0.25","0","0.25","≥0.5"),
+        name = "Coefficient"
+        
+    ) +
+    geom_point(
+        aes(size = ifelse(sig==1, 1, NA)),
+        shape = 8, 
+        colour = "black",
+        show.legend = F
+    ) +
+    scale_size_area(max_size = 2) +
+    xlab('Germline gene that increases mCA-auto risk') +
+    ylab('') +
+    plot_theme +
+    scale_y_discrete(expand = c(0,0)) +
+    scale_x_discrete(expand = c(0,0)) +
+    theme(
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line = element_blank(),
+        legend.position = 'none',
+        axis.text.x = element_text(face = "italic", angle = 30, hjust = 1)
+    )
+
+a = (p1&theme(legend.margin = margin(b=-2,unit = "mm")))/plot_spacer()/p2 + plot_layout(heights = c(1,0.1,0.5))
+
+ggsave(paste0(dir,"Figures/","E2a.pdf"), plot = a, width = 180, height = 50, units = c("mm"), dpi = 300, device = cairo_pdf)
+
+```
+
+## Efig2b: g->CH subs
+```{r eval=FALSE, include=FALSE}
+##################### by gene
+MMR=c("MLH1","MSH2","MSH3","MSH6","PMS2","POLD1")
+BER=c("MUTYH","NTHL1","POLD1","POLE","POLH","WRN")
+NER=c("ERCC1","ERCC2","ERCC3","ERCC4","ERCC5","POLD1","POLE","XPA","XPC")
+
+g_path = germline_c  %>%
+  dplyr::select(eid,symbol) %>%
+  mutate(path=case_when (
+         symbol%in%MMR ~ "g_MMR",
+         symbol%in%BER ~ "g_BER",
+         symbol%in%NER ~ "g_NER")) %>%
+  filter(is.na(path)==F) %>%  
+  reshape2::dcast(
+    formula = eid ~ path,
+    value.var = 'path',
+    fun.aggregate = function(x) {min(1, length(x))}
+)
+         
+subs = ch_c %>% filter(type == 'SNV') %>%  
+  reshape2::dcast(
+    formula = eid ~ subs,
+    value.var = 'subs',
+    fun.aggregate = function(x) {min(1, length(x))}
+)
+
+D = M_wide %>% dplyr::select("eid","germline",any_of(g_ch)) %>%
+  mutate(no_germline=1-germline) %>%
+  left_join(.,g_path,by="eid") %>%
+  left_join(.,subs,by="eid")
+D[is.na(D)] <- 0
+
+gene_list = c("germline",colnames(D)[grepl("g_",colnames(D))])
+sub_list = colnames(subs)[-1]
+
+var = list()
+for (term in gene_list) {
+  for (sub in sub_list) {
+    t = D %>% count(get(term),get(sub)) %>%
+      cbind(term=term,
+            sub=sub)
+    var = rbind(var,t)
+  }
+}
+
+plot = var %>% group_by(term,sub,`get(term)`) %>%
+  mutate(n_germline=sum(n)) %>%
+  filter(`get(sub)`==1 & (`get(term)`==1 | term=="germline")) %>%
+  group_by(term,`get(term)`) %>%
+  mutate(n_subs = sum(n),
+         prop_sub = n/n_subs*100) %>%
+  mutate(term=ifelse(`get(term)`==0,"No PGV",term),
+         term=str_replace_all(term,c("germline"="PGV","g_"="")),
+         label= paste0(term,"\n(n=",n_germline,")")) %>%
+  ungroup()
+
+color_cosmic = c("C>A"="#02bced","C>G"="#010101","C>T"="#e22926","T>A"="#cac8c9","T>C"="#a0ce62","T>G"="#ecc6c4")
+
+p = plot %>% filter(n_subs>10) %>%
+  arrange(-n_germline) %>% 
+  mutate(label=factor(label,levels = unique(label))) %>%
+  ggplot(aes(x = label, y = prop_sub, fill = sub)) +
+  geom_bar(stat = 'identity', size = 0) +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(face = "italic", angle = 30, vjust = 0.5),
+    legend.position = 'top',
+    legend.direction = "horizontal",
+    legend.margin = margin(b=-1, unit ="mm")
+  ) + 
+  #geom_text(aes(label,y=1.05,label=n_subs)) +
+  ylab('Proportion (%)') +
+  xlab('') +
+  scale_fill_manual(name="SNV single base substitution", values = color_cosmic)
+
+################################## signature plot
+gene_list = c("germline","no_germline","g_BER","g_MMR","g_NER")
+
+p_list = list()
+for (term in gene_list) {
+
+id = D %>% filter(get(term)==1) %>% pull(eid) %>% unique()
+t = ch_c %>%
+  filter(type == "SNV") %>% 
+  dplyr::select(eid,Ref=REF,Alt=ALT,triplets) %>% 
+  filter(eid%in%id) %>% 
+  get_context() %>% 
+  get_context_table() %>%
+  cbind(n_germline=length(id),
+        germline=term) %>%
+  mutate(context = gsub("\\[(.*?)\\]", "-",context96)) 
+
+p_name <- paste("p_", gsub("g_", "", term), sep = "")
+
+p_list[[p_name]] = ggplot(t) +
+  geom_col(aes(x = context, y = n, fill = substitution), color = 'white', size = 0.3) +
+  facet_grid2(cols = vars(substitution),
+             strip = strip_themed(background_x = elem_list_rect(fill = color_cosmic))) +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 90, color = "black", vjust = 0.5, size=5),
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        strip.background = element_rect(colour = "white"),
+        strip.text = element_text(colour = "white"),
+        panel.spacing = unit(0, "lines")) +
+  scale_fill_manual(name="SNV single base substitution", values = color_cosmic) +
+  ylab("Frequency") +
+  ggtitle(paste("CH among people with", 
+                str_replace_all(t$germline,c("no_germline"="no germline variant","germline"="germline variant","g_BER"="germline variant in BER pathway","g_MMR"="germline variant in MMR pathway","g_NER"="germline variant in NER pathway")),
+                " (n = ", t$n_germline,")"))
+}
+
+b =p /p_list[[1]] / plot_spacer() /p_list[[2]] + plot_layout(heights = c(1,1,0.05,1))
+savePdf(p=b,w=180,h=150,o="E2b.pdf")
+
+# Supplementary Fig3
+S_subs = p_list[[3]] / plot_spacer() / (p_list[[4]] & theme(legend.position = "none")) / plot_spacer() /(p_list[[5]] & theme(legend.position = "none")) + plot_layout(heights = c(1,0.05,1,0.05,1))
+savePdf(p=S_subs,w=180,h=150,o="S_subs.png")
+```
+
+## Efig3: g->Heme subtype
+```{r}
+plot = readRDS("Inputs/g_heme_subtype.rds") %>% filter(grepl("term",term)) %>%
+  filter(exposure%in%paste0("g_",sig_heme)) %>%
+  filter(ncooccur>=2) %>%
+  mutate(sig=ifelse(p.value<0.05,1,NA),
+         logHR=log(estimate),
+         logHR=ifelse(logHR>3,3,logHR),
+         outcome=factor(outcome,levels = c("Secondary","AML","MPN","MDS","MDS/MPN","CML","Other Myeloid","NHL","HL","CLL","Other Lymphoid","MM","Other Plasma","Other Hematopoietic")
+, labels = c("Secondary","AML","MPN","MDS","MDS/MPN","CML","Other Myeloid","NHL","HL","CLL","Other Lymphoid","MM","Other Plasma","Other Hematopoietic")
+),
+         exposure=str_remove(exposure,"g_"))
+
+p = plot %>% arrange(nexposure) %>%
+  mutate(exposure=factor(exposure,levels = unique(exposure))) %>%
+  ggplot(aes(x = outcome, y = exposure, fill = logHR)) +
+    geom_tile(color = "lightgrey") +
+    scale_fill_gradient2(
+        low = "darkblue",
+        mid = "white",
+        high = "darkred", 
+        midpoint = 0, 
+        na.value = "white",
+        limits = c(-3,3),
+        breaks=c(-3,-2,-1,0,1,2,3),
+        labels=c("≤-3","-2","-1","0","1","2","≥3"),
+        name = "log hazard ratio"
+        
+    ) +
+    geom_point(
+        aes(size = ifelse(sig==1, 1, NA)),
+        shape = 8, 
+        colour = "black",
+        show.legend = F
+    ) +
+    scale_size_area(max_size = 2) +
+    ylab('Germline gene that increases the risk HMs') +
+    xlab('') +
+    plot_theme +
+    scale_y_discrete(expand = c(0,0)) +
+    scale_x_discrete(expand = c(0,0)) +
+    theme(
+      axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1),
+      axis.text.y = element_text(face = "italic"),
+    )
+
+ggsave("Figures/ED_Fig3.pdf", plot = p, width = 120, height = 80, units = c("mm"), dpi = 300, device = cairo_pdf)
+
+```
+
+## Efig4: LOF/Mis->CH/heme
+```{r}
+### Efig4a
+plot = readRDS("Inputs/g_type_ch.rds") %>% filter(grepl("term",term)) %>%
+  rowwise() %>%
+  mutate(type=str_split_fixed(germline,"_",n=3)[[3]],
+         type=ifelse(type=="","All",type),
+         gene=str_split_fixed(germline,"_",n=3)[[2]]) %>%
+  filter(type!="All") %>%
+  filter(gene%in%c("CHEK2","ATM")) %>%
+  arrange(n_germline) %>%
+  mutate(ch=factor(ch, levels = c("ch_heme","cnv_auto"), labels = c("CH-heme","mCA-auto")))
+
+t  = plot %>% arrange(ch,gene,type) %>% dplyr::select(germline,n_germline,ch,n_ch=nevent,ncooccur,total,OR=estimate,std.error,conf.low,conf.high,p.value)
+write_xlsx(t,"Tables/supp_Efig4a.xlsx")
+
+p1 = plot %>%
+  arrange(n_germline) %>%
+  mutate(gene=factor(gene,levels = unique(gene))) %>%
+  ggplot(aes(x = gene, y = estimate, ymin = conf.low, ymax = conf.high, color = type, fill = type, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 6/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  facet_grid(cols=vars(ch), scales = "free") +
+  coord_flip() +
+  scale_y_log10() +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(face="italic"),
+    legend.position = "top",
+    legend.margin = margin(b=-0.5,unit = "mm")
+  ) +
+  scale_fill_manual(name="Germline variant type", breaks=c("LOF","Missense"),values = c(colors[1],colors[2])) +
+  scale_color_manual(name="Germline variant type", breaks=c("LOF","Missense"), values = c(colors[1],colors[2])) +
+  ylab("Odds Ratio (95% CI)") +
+  xlab('Germline gene')
+
+### Efig4b
+plot = readRDS("Inputs/g_type_heme.rds") %>% filter(grepl("term",term)) %>%
+  rowwise() %>%
+  mutate(type=str_split_fixed(exposure,"_",n=3)[[3]],
+         type=ifelse(type=="","All",type),
+         gene=str_split_fixed(exposure,"_",n=3)[[2]]) %>%
+  filter(type!="All") %>%
+  filter(outcome!="heme") %>%
+  mutate(outcome=factor(outcome, levels = c("Myeloid","Lymphoid"), labels = c("Myeloid Malignancies","Lymphoid Malignancies")))
+
+t  = plot %>% arrange(outcome,gene,type) %>% dplyr::select(germline=exposure,n_germline=nexposure,cancer=outcome,n_cancer=noutcome,ncooccur,total,HR=estimate,std.error,conf.low,conf.high,p.value)
+write_xlsx(t,"Tables/supp_Efig4b.xlsx")
+
+p2 = plot %>%
+  arrange(nexposure) %>%
+  mutate(gene=factor(gene,levels = unique(gene))) %>%
+  ggplot(aes(x = gene, y = estimate, ymin = conf.low, ymax = conf.high, color = type, fill = type, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 6/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  facet_grid(cols=vars(outcome), scales = "free") +
+  coord_flip() +
+  scale_y_log10() +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(face="italic"),
+    legend.position = "top",
+    legend.margin = margin(b=-0.5,unit = "mm")
+  ) +
+  scale_fill_manual(name="Germline variant type", breaks=c("LOF","Missense"),values = c(colors[1],colors[2])) +
+  scale_color_manual(name="Germline variant type", breaks=c("LOF","Missense"), values = c(colors[1],colors[2])) +
+  ylab("Hazard Ratio (95% CI)") +
+  xlab('Germline gene')
+
+E4 = ggarrange(panel_theme(p1,"a"),panel_theme(p2,"b"),nrow = 2,common.legend = T, legend = "top")
+savePdf(p=E4,w=89,h=70,o="ED_Fig4.pdf")
+
+```
+
+# Supplementary Figures
+#### S_Fig1. Age plot (QC)
+```{r}
+########## QC
+## age distribution germline vs ch
+plot = readRDS("Inputs/qc.rds")
+
+p = ggplot(
+  plot,
+  aes(x = age_cat,
+      y = prop,
+      color = cat,
+      fill = cat,
+      group = cat
+  )
+) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = T, level= 0.95, alpha = 0.3) +
+  facet_wrap(~ gene, ncol = 3, scales = "free") +
+  xlab("Age") +
+  ylab("Proportion of carriers") +
+  plot_theme +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 30,vjust = 0.5)) +
+  scale_fill_npg(name="Mutation", labels=c("CH","Germline")) +
+  scale_color_npg(name="Mutation", labels=c("CH","Germline"))
+
+savePdf(p=p,w=180,h=120,o="S_qc.png")
+```
+
+## S_Fig2. forest plot by cohorts
+```{r}
+c = germline_c %>% dplyr::select(symbol,n=n_germline) %>% distinct()
+
+plot = readRDS("Inputs/logistic_combined2.rds") %>%
+  filter(analysis=="gene-overall") %>%
+  mutate(gene=str_remove(germline,"g_")) %>%
+  left_join(.,c,by=c("gene"="symbol")) %>%
+  filter(gene%in%gene[p.value_FE<0.05]) %>%
+  mutate(gene_label = paste0(gene," (n=",n,")")) %>%
+  mutate(n_germline_FE=rowSums(dplyr::select(., n_germline_AoU, n_germline_CCDG, n_germline_MSK, n_germline_TCGA, n_germline_MGB), na.rm = TRUE))
+
+col=c("gene","ch","estimate", "conf.low","conf.high","p.stars","q.stars","n_germline","gene_label")
+
+t = bind_rows(plot %>% dplyr::select(any_of(col)) %>% mutate(cohort="UKBB"),
+              plot %>% dplyr::select("gene","ch", ends_with("_AoU")) %>% dplyr::rename_with(function(x) str_remove(x,"_AoU")) %>%
+               mutate(gene_label = paste0(gene," (n=",n_germline,")")) %>% dplyr::select(any_of(col)) %>% mutate(cohort="AoU"),
+              plot %>% dplyr::select("gene","ch", ends_with("_MGB")) %>% dplyr::rename_with(function(x) str_remove(x,"_MGB")) %>%
+               mutate(gene_label = paste0(gene," (n=",n_germline,")")) %>% dplyr::select(any_of(col)) %>% mutate(cohort="MGBB"),
+              plot %>% dplyr::select("gene","ch", ends_with("_CCDG")) %>% dplyr::rename_with(function(x) str_remove(x,"_CCDG")) %>%
+               mutate(gene_label = paste0(gene," (n=",n_germline,")")) %>% dplyr::select(any_of(col)) %>% mutate(cohort="CCDG"),
+              plot %>% dplyr::select("gene","ch", ends_with("_TCGA")) %>% dplyr::rename_with(function(x) str_remove(x,"_TCGA")) %>%
+               mutate(gene_label = paste0(gene," (n=",n_germline,")")) %>% dplyr::select(any_of(col)) %>% mutate(cohort="TCGA"),
+              plot %>% dplyr::select("gene","ch", ends_with("_MSK")) %>% dplyr::rename_with(function(x) str_remove(x,"_MSK")) %>%
+               mutate(gene_label = paste0(gene," (n=",n_germline,")")) %>% dplyr::select(any_of(col)) %>% mutate(cohort="MSK"),
+              plot %>% dplyr::select("gene","ch", ends_with("_FE")) %>% dplyr::rename_with(function(x) str_remove(x,"_FE")) %>% 
+               mutate(gene_label = paste0(gene," (n=",n_germline,")")) %>%dplyr::select(any_of(col)) %>% mutate(cohort="Meta-analysis")
+              ) %>% 
+  filter(cohort!="UKBB") %>%
+  mutate(cohort=factor(cohort, levels = c("Meta-analysis","MSK","TCGA","CCDG","MGBB","AoU")))
+  
+p = t %>%
+  filter(is.na(estimate)==F) %>%
+  ggplot(aes(x = gene, y = estimate, ymin = conf.low, ymax = conf.high, color = cohort, fill = cohort, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 6/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  coord_flip() +
+  facet_wrap(.~ch,scales = "free", ncol = 2, labeller = labeller(ch=c(`ch_heme`="CH-heme",`cnv_auto`="mCA-auto"))) +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(face = "italic"),
+    legend.position = "right", 
+    legend.background = element_blank()
+  ) +
+  xlab("Germline gene") +
+  ylab('Odds Ratio (95% CI) of CH') +  
+  scale_fill_nejm(breaks=rev(c("Meta-analysis","MSK","TCGA","CCDG","MGBB","AoU")), labels=rev(c("Meta-analysis","MSK","TCGA","CCDG","MGBB","AoU"))) +
+  scale_color_nejm(breaks=rev(c("Meta-analysis","MSK","TCGA","CCDG","MGBB","AoU")), labels=rev(c("Meta-analysis","MSK","TCGA","CCDG","MGBB","AoU"))) +
+  scale_y_log10()
+
+savePdf(p,w=160,h=120,o="forest_cohort.png")
+
+```
+
+## S_Fig5. MV-adjusted
+```{r}
+D = M_wide
+
+gene_list = unique(c("germline","Dominant","Recessive",g_ch,g_mCA))
+ch_list = c("ch_heme","cnv_auto")
+
+# covariates for regression
+cancer=M_wide %>% dplyr::select(starts_with("prior_")) %>% colnames()
+MV = c('ageBaseline',"PC1","PC2","PC3","batch","smokingCat","sex",cancer)
+
+logistf_gene_var = list()
+for (event in ch_list) {
+
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+        ncooccur=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = D %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D,
+            na.action = 'na.omit',
+            pl=FALSE
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]),
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+saveRds(logistf_gene_var,"Inputs/MV_adjusted.rds")
+
+c = germline_c %>% dplyr::select(symbol,n=n_germline) %>% distinct()
+
+plot = bind_rows(readRDS("Inputs/logistic_combined2.rds") %>%
+  filter(analysis=="gene-overall") %>%
+  filter(p_fdr<0.05) %>%
+  mutate(covariates="basic"),
+  readRDS("Inputs/MV_adjusted.rds") %>% filter(grepl("term",term)) %>%
+  mutate(covariates="full",n_ch=nevent)) %>%
+  group_by(germline,ch) %>%
+  mutate(n_model=n()) %>%
+  filter(n_model==2) %>%
+  mutate(gene=str_remove(germline,"g_")) %>%
+  left_join(.,c,by=c("gene"="symbol")) %>%
+  mutate(gene_label = paste0(gene," (n=",n,")")) %>%
+  mutate(gene_label = factor(gene_label, levels = level)) %>%
+  mutate(covariates=factor(covariates,levels = c("full","basic")))
+
+t = plot %>% dplyr::select(germline=gene,n_germline=n,ch,n_ch,ncooccur,total,OR=estimate,std.error,conf.low,conf.high,p.value,covariates) %>% mutate(ch=str_replace_all(ch,c("ch_heme"="CH-heme","cnv_auto"="mCA-auto"))) %>% arrange(ch,germline,covariates)
+
+write_xlsx(t,"Tables/supp_Sfig5.xlsx")
+
+p = plot %>%
+  ggplot(aes(x = gene_label, y = estimate, ymin = conf.low, ymax = conf.high, color = covariates, fill = covariates, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 6/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  coord_flip() +
+  facet_wrap(.~ch,scales = "free", ncol = 2, labeller = labeller(ch=c(`ch_heme`="CH-heme",`cnv_auto`="mCA-auto"))) +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(face = "italic"),
+    legend.position = "right", 
+    legend.background = element_blank()
+  ) +
+  xlab("Germline gene") +
+  ylab('Odds Ratio (95% CI) of CH') +
+  scale_y_log10() +   
+  scale_fill_nejm(breaks=rev(c("full","basic")), labels=rev(c("full","basic"))) +
+  scale_color_nejm(breaks=rev(c("full","basic")), labels=rev(c("full","basic"))) 
+
+savePdf(p,w=180,h=90,o="covar_full.png")
+
+```
+
+## S_Fig6. sensitivety analyses
+```{r}
+## remove abnormal blood counts
+
+blood = readRDS("Restricted/blood_z_050824.rds") %>% 
+  mutate(thrombocytopenia=ifelse(PLT<150,1,0),
+         anemia=ifelse(HGB<12,1,0),
+         neutropenia=ifelse(NEUT<1.8,1,0),
+         cytopenia=pmax(thrombocytopenia,anemia,neutropenia),
+         leukocytosis=ifelse(WBC>11,1,0)) %>% filter(cytopenia==0&leukocytosis==0)
+
+D = M_wide %>%
+  semi_join(blood, by = "eid")
+
+gene_list = unique(c("germline","Dominant","Recessive",g_ch,g_mCA))
+ch_list = c("ch_heme","cnv_auto")
+
+# covariates for regression
+MV = c('ageBaseline',"PC1","PC2","PC3","batch")
+
+logistf_gene_var = list()
+for (event in ch_list) {
+
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+        ncooccur=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = D %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D,
+            na.action = 'na.omit',
+            pl=FALSE
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]),
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+saveRds(logistf_gene_var,"Inputs/g_CH_remove_cytopenia.rds")
+
+## remove HM within 5 years
+remove = M_wide %>% dplyr::select(eid,heme,survtime_heme) %>% 
+  mutate(yr=survtime_heme/365,
+         remove=ifelse(heme==1&yr<5,1,0)) %>%
+  filter(remove==1)
+
+D = M_wide %>% anti_join(remove,by="eid")
+
+gene_list = unique(c("germline","Dominant","Recessive",g_ch,g_mCA))
+ch_list = c("ch_heme","cnv_auto")
+
+# covariates for regression
+MV = c('ageBaseline',"PC1","PC2","PC3","batch")
+
+logistf_gene_var = list()
+for (event in ch_list) {
+
+    germline_list = filter_terms(
+        D %>% filter(get(event) == 1),
+        gene_list,
+        verbose = T,
+        threshold = 2
+    )
+    print(germline_list)
+    for (term in germline_list) {
+        print(paste0(term,"-",event))
+        
+        ncooccur=D %>% filter(get(term)==1 & get(event)==1) %>% nrow()
+        n_germline = D %>% filter(get(term)==1) %>% nrow()
+        
+        logistf = logistf(
+            formula = as.formula(paste0("get(event) ~",paste(MV, collapse = "+"), "+ get(term)")),
+            data = D,
+            na.action = 'na.omit',
+            pl=FALSE
+            )
+        logistf_data = logistf %>% sjPlot::get_model_data(type="est") %>% 
+          mutate(total=logistf$n, 
+                 nevent=sum(logistf$model[["get(event)"]]),
+                 ncooccur=ncooccur,
+                 n_germline=n_germline) %>%
+          cbind(ch = event,
+                germline=term)
+        logistf_gene_var = rbind(logistf_gene_var, logistf_data)
+    }
+}
+saveRds(logistf_gene_var,"Inputs/g_ch_remove_earlyHM.rds")
+
+### plot
+c = germline_c %>% dplyr::select(symbol,n=n_germline) %>% distinct()
+
+plot = bind_rows(readRDS("Inputs/logistic_combined2.rds") %>%
+  filter(analysis=="gene-overall") %>%
+  filter(p_fdr<0.05) %>%
+  mutate(cat="all"),
+  readRDS("Inputs/g_CH_remove_cytopenia.rds") %>% filter(grepl("term",term)) %>%
+  mutate(cat="no abnormal blood counts",n_ch=nevent),
+  readRDS("Inputs/g_ch_remove_earlyHM.rds") %>% filter(grepl("term",term)) %>%
+  mutate(cat="no HM in 5 years",n_ch=nevent)) %>%
+  group_by(germline,ch) %>%
+  mutate(n_model=n()) %>%
+  filter(n_model==3) %>%
+  mutate(gene=str_remove(germline,"g_")) %>%
+  left_join(.,c,by=c("gene"="symbol")) %>%
+  mutate(gene_label = paste0(gene," (n=",n,")")) %>%
+  mutate(gene_label = factor(gene_label, levels = level)) %>%
+  mutate(cat=factor(cat,levels = c("no HM in 5 years","no abnormal blood counts","all")))
+
+t = plot %>% dplyr::select(germline=gene,n_germline=n,ch,n_ch,ncooccur,total,OR=estimate,std.error,conf.low,conf.high,p.value,population=cat) %>% mutate(ch=str_replace_all(ch,c("ch_heme"="CH-heme","cnv_auto"="mCA-auto"))) %>% arrange(ch,germline,population)
+
+write_xlsx(t,"Tables/supp_Sfig6.xlsx")
+
+p = plot %>%
+  ggplot(aes(x = gene_label, y = estimate, ymin = conf.low, ymax = conf.high, color = cat, fill = cat, label = p.stars, vjust=0)) +
+  geom_blank() +
+  geom_hline(yintercept = 1, color = "gray", linetype = "solid") +
+  geom_text(position = position_dodge(width = 0.9), size = 6/.pt, alpha = .9, show.legend = FALSE) +
+  geom_errorbar(position = position_dodge(width = 0.9), width = 0, size=1/.pt, show.legend = TRUE) + 
+  geom_point(position = position_dodge(width = 0.9), size=1, show.legend = TRUE) +
+  coord_flip() +
+  facet_wrap(.~ch,scales = "free", ncol = 2, labeller = labeller(ch=c(`ch_heme`="CH-heme",`cnv_auto`="mCA-auto"))) +
+  plot_theme +
+  theme(
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(face = "italic"),
+    legend.position = "right", 
+    legend.background = element_blank()
+  ) +
+  xlab("Germline gene") +
+  ylab('Odds Ratio (95% CI) of CH') +
+  scale_y_log10() +   
+  scale_fill_nejm(name="population", breaks=rev(c("no HM in 5 years","no abnormal blood counts","all")), labels=rev(c("no HM in 5 years","no abnormal blood counts","all"))) +
+  scale_color_nejm(name="population", breaks=rev(c("no HM in 5 years","no abnormal blood counts","all")), labels=rev(c("no HM in 5 years","no abnormal blood counts","all"))) 
+
+savePdf(p,w=160,h=120,o="remove_abnormal.png")
+
+```
+
